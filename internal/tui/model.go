@@ -24,6 +24,7 @@ type emailAPI interface {
 	RestoreEmail(context.Context, string) (string, error)
 	Me(context.Context, string) (api.Account, error)
 	Inbox(context.Context, string) (api.NotesPage, error)
+	InboxPage(context.Context, string, string) (api.NotesPage, error)
 	CreateInboxNote(context.Context, string, string) (api.Note, error)
 }
 
@@ -58,7 +59,7 @@ type Model struct {
 	email       string
 	username    string
 	notes       []api.Note
-	more        bool
+	nextCursor  string
 	selected    int
 	reader      viewport.Model
 	draft       textarea.Model
@@ -142,6 +143,11 @@ type createdNote struct {
 	note api.Note
 	err  error
 }
+type olderNotes struct {
+	page   api.NotesPage
+	cursor string
+	err    error
+}
 
 func (m Model) loadInbox(token string, save bool) tea.Cmd {
 	return func() tea.Msg {
@@ -213,7 +219,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.stage = inboxStage
 		m.username = msg.account.Username
 		m.notes = msg.page.Items
-		m.more = msg.page.NextCursor != nil
+		m.nextCursor = cursorValue(msg.page.NextCursor)
 		m.selected = 0
 		m.message = ""
 		if m.selectID != "" {
@@ -234,6 +240,45 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stage = captureStage
 			m.message = "Sign-in complete. Your unsaved draft is ready."
 			return m, m.draft.Focus()
+		}
+		return m, nil
+	case olderNotes:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			m.message = "Could not load older notes. Press m to retry; loaded notes are unchanged."
+			return m, nil
+		}
+		seen := make(map[string]bool, len(m.notes))
+		for _, note := range m.notes {
+			seen[note.ID] = true
+		}
+		firstNew := len(m.notes)
+		for _, note := range msg.page.Items {
+			if !seen[note.ID] {
+				seen[note.ID] = true
+				m.notes = append(m.notes, note)
+			}
+		}
+		m.nextCursor = cursorValue(msg.page.NextCursor)
+		if m.nextCursor == msg.cursor {
+			m.nextCursor = ""
+			m.message = "Server repeated a page cursor; stopped loading older notes. Refresh to start over."
+			return m, nil
+		}
+		m.message = ""
+		if firstNew < len(m.notes) {
+			m.selected = firstNew
+		} else if m.nextCursor == "" {
+			m.message = "No more notes."
 		}
 		return m, nil
 	case createdNote:
@@ -411,6 +456,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case inboxStage:
 			switch msg.String() {
+			case "m":
+				if m.nextCursor != "" {
+					m.busy = true
+					m.message = "Loading older notes…"
+					cursor := m.nextCursor
+					return m, func() tea.Msg {
+						page, err := m.api.InboxPage(context.Background(), m.token, cursor)
+						return olderNotes{page: page, cursor: cursor, err: err}
+					}
+				}
+				m.message = "No more notes to load."
+				return m, nil
 			case "n":
 				m.stage = captureStage
 				m.draft.SetValue("")
@@ -525,6 +582,13 @@ func (m Model) contentWidth() int {
 	return max(20, min(68, m.width-4))
 }
 
+func cursorValue(cursor *string) string {
+	if cursor == nil {
+		return ""
+	}
+	return *cursor
+}
+
 // Notes are untrusted terminal text; remove control sequences before rendering.
 func safeText(text string) string {
 	return strings.Map(func(r rune) rune {
@@ -618,10 +682,12 @@ func (m Model) View() string {
 			}
 			body += fmt.Sprintf("%s%s  %s\n", mark, m.notes[i].CreatedAt.Local().Format("Jan 02"), preview(m.notes[i].Content, max(12, m.contentWidth()-16)))
 		}
-		if m.more {
-			body += "\n" + dimStyle.Render("Showing newest 50 notes; older pages are not available yet.")
+		if m.nextCursor != "" {
+			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · m load older", len(m.notes))))
+		} else if len(m.notes) > 0 {
+			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of Inbox", len(m.notes))))
 		}
-		body += "\n" + dimStyle.Render("n new · ↑/↓ or j/k select · Enter read · r refresh · s sign in · q quit")
+		body += "\n" + dimStyle.Render("n new · ↑/↓ or j/k select · Enter read · r newest · s sign in · q quit")
 	case readingStage:
 		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("↑/↓ or j/k scroll · Esc back · q quit")
 	case captureStage:

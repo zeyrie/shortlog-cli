@@ -164,3 +164,25 @@ func TestCreateInboxNote(t *testing.T) {
 		t.Fatalf("create: %+v, %v", note, err)
 	}
 }
+
+func TestInboxCursorIsEncodedUnchanged(t *testing.T) {
+	cursor := "opaque+/= &?"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/notes" || r.URL.Query().Get("cursor") != cursor || len(r.URL.Query()) != 1 || r.Header.Get("Authorization") != "Bearer session" {
+			t.Errorf("unexpected cursor request: %s %q", r.URL.String(), r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.InboxPage(context.Background(), "session", cursor)
+	if err != nil || len(page.Items) != 0 || page.NextCursor != nil {
+		t.Fatalf("page: %+v, %v", page, err)
+	}
+	if _, err := client.InboxPage(context.Background(), "session", ""); err == nil {
+		t.Fatal("empty cursor silently refreshed first page")
+	}
+}

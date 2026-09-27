@@ -132,6 +132,15 @@ func (c *Client) Inbox(ctx context.Context, token string) (NotesPage, error) {
 	return result, err
 }
 
+func (c *Client) InboxPage(ctx context.Context, token, cursor string) (NotesPage, error) {
+	if cursor == "" {
+		return NotesPage{}, errors.New("missing Inbox cursor")
+	}
+	var result NotesPage
+	err := c.get(ctx, "/v1/notes?cursor="+url.QueryEscape(cursor), token, &result)
+	return result, err
+}
+
 func (c *Client) CreateInboxNote(ctx context.Context, token, content string) (Note, error) {
 	var result Note
 	err := c.postAuthorized(ctx, "/v1/notes", token, map[string]string{"content": content}, &result, http.StatusCreated)

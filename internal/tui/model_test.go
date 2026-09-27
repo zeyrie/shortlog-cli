@@ -20,6 +20,10 @@ type fakeAPI struct {
 	meErr     error
 	inboxErr  error
 	notes     []api.Note
+	next      *string
+	pages     map[string]api.NotesPage
+	pageErr   error
+	requested []string
 	createErr error
 	created   []string
 }
@@ -62,7 +66,11 @@ func (f *fakeAPI) Me(_ context.Context, _ string) (api.Account, error) {
 	return api.Account{ID: "account", Username: "Ari"}, f.meErr
 }
 func (f *fakeAPI) Inbox(_ context.Context, _ string) (api.NotesPage, error) {
-	return api.NotesPage{Items: f.notes}, f.inboxErr
+	return api.NotesPage{Items: f.notes, NextCursor: f.next}, f.inboxErr
+}
+func (f *fakeAPI) InboxPage(_ context.Context, _, cursor string) (api.NotesPage, error) {
+	f.requested = append(f.requested, cursor)
+	return f.pages[cursor], f.pageErr
 }
 func (f *fakeAPI) CreateInboxNote(_ context.Context, _, content string) (api.Note, error) {
 	f.created = append(f.created, content)
@@ -286,5 +294,77 @@ func TestQuickCaptureUnauthorizedResumesAfterSignIn(t *testing.T) {
 	m = next.(Model)
 	if m.stage != captureStage || m.draft.Value() != "Unsent note" || m.resumeDraft {
 		t.Fatal("did not resume draft")
+	}
+}
+
+func TestInboxPaginationAndRefresh(t *testing.T) {
+	first, second := "first-cursor", "second-cursor"
+	f := &fakeAPI{
+		notes: []api.Note{{ID: "new", Content: "new"}, {ID: "middle", Content: "middle"}},
+		next:  &first,
+		pages: map[string]api.NotesPage{
+			first:  {Items: []api.Note{{ID: "middle", Content: "middle"}, {ID: "old", Content: "old"}}, NextCursor: &second},
+			second: {Items: []api.Note{{ID: "oldest", Content: "oldest"}}},
+		},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 2 || m.nextCursor != first {
+		t.Fatal("first page did not load")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if !m.busy || cmd == nil {
+		t.Fatal("older page did not start")
+	}
+	m, blocked := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if blocked != nil {
+		t.Fatal("sent duplicate page request while loading")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 3 || m.selected != 2 || m.notes[2].ID != "old" || m.nextCursor != second || len(f.requested) != 1 || f.requested[0] != first {
+		t.Fatalf("page 2: %+v, %v", m.notes, f.requested)
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 4 || m.selected != 3 || m.nextCursor != "" || f.requested[1] != second {
+		t.Fatal("final page did not load")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if cmd != nil || len(f.requested) != 2 {
+		t.Fatal("requested beyond final page")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 2 || m.selected != 0 || m.nextCursor != first {
+		t.Fatal("refresh did not reset to newest page")
+	}
+}
+
+func TestOlderPageFailurePreservesListAndCursor(t *testing.T) {
+	cursor := "retry-me"
+	f := &fakeAPI{pageErr: errors.New("offline")}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m.notes = []api.Note{{ID: "existing", Content: "existing"}}
+	m.nextCursor = cursor
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.busy || len(m.notes) != 1 || m.nextCursor != cursor || !strings.Contains(m.View(), "retry") {
+		t.Fatal("failed page lost existing notes or cursor")
+	}
+	f.pageErr = nil
+	f.pages = map[string]api.NotesPage{cursor: {Items: []api.Note{{ID: "older", Content: "older"}}}}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 2 || m.notes[1].ID != "older" || m.nextCursor != "" {
+		t.Fatal("retry did not append page")
 	}
 }
