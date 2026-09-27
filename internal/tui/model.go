@@ -26,6 +26,8 @@ type emailAPI interface {
 	Inbox(context.Context, string) (api.NotesPage, error)
 	InboxPage(context.Context, string, string) (api.NotesPage, error)
 	CreateInboxNote(context.Context, string, string) (api.Note, error)
+	UpdateNote(context.Context, string, string, string) (api.Note, error)
+	DeleteNote(context.Context, string, string) error
 }
 
 type sessionStore interface {
@@ -45,30 +47,38 @@ const (
 	inboxStage
 	readingStage
 	captureStage
+	discardStage
+	deleteStage
 )
 
 type Model struct {
-	api         emailAPI
-	store       sessionStore
-	stage       stage
-	inputs      [4]textinput.Model
-	focus       int
-	challenge   string
-	ticket      string
-	token       string // Never rendered or logged.
-	email       string
-	username    string
-	notes       []api.Note
-	nextCursor  string
-	selected    int
-	reader      viewport.Model
-	draft       textarea.Model
-	resumeDraft bool
-	selectID    string
-	busy        bool
-	message     string
-	width       int
-	height      int
+	api              emailAPI
+	store            sessionStore
+	stage            stage
+	inputs           [4]textinput.Model
+	focus            int
+	challenge        string
+	ticket           string
+	token            string // Never rendered or logged.
+	email            string
+	username         string
+	notes            []api.Note
+	nextCursor       string
+	selected         int
+	reader           viewport.Model
+	draft            textarea.Model
+	editorID         string
+	editorStart      string
+	editorBack       stage
+	deleteID         string
+	deleteBack       stage
+	quitAfterDiscard bool
+	resumeDraft      bool
+	selectID         string
+	busy             bool
+	message          string
+	width            int
+	height           int
 }
 
 const (
@@ -79,12 +89,15 @@ const (
 )
 
 func New(client emailAPI, store sessionStore) Model {
-	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(68, 14)}
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14)}
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
 	m.draft.CharLimit = 20000
 	m.draft.ShowLineNumbers = false
-	m.draft.SetWidth(68)
+	m.draft.Prompt = ""
+	// The default focused-line background is black in dark terminals.
+	m.draft.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	m.draft.SetWidth(m.innerWidth())
 	m.draft.SetHeight(12)
 	for i := range m.inputs {
 		m.inputs[i] = textinput.New()
@@ -143,6 +156,14 @@ type createdNote struct {
 	note api.Note
 	err  error
 }
+type updatedNote struct {
+	note api.Note
+	err  error
+}
+type deletedNote struct {
+	id  string
+	err error
+}
 type olderNotes struct {
 	page   api.NotesPage
 	cursor string
@@ -174,7 +195,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeReader()
-		m.draft.SetWidth(m.contentWidth())
+		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
 		return m, nil
 	case loadedSession:
@@ -309,6 +330,72 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.draft.Blur()
 		m.message = "Note saved. Refreshing Inbox…"
 		return m, m.loadInbox(m.token, false)
+	case updatedNote:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.resumeDraft = true
+				m.editorBack = inboxStage
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again to resume your unsaved edits."
+				return m, nil
+			}
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				m.message = "The server rejected these changes. Check the note and try again."
+			} else if errors.As(msg.err, &apiErr) && apiErr.Code == "not_found" {
+				m.message = "This note is no longer available. Copy your draft before leaving the editor."
+			} else {
+				m.message = "Update not confirmed. Check the note before retrying; your draft is still here."
+			}
+			return m, nil
+		}
+		for i := range m.notes {
+			if m.notes[i].ID == msg.note.ID {
+				m.notes[i] = msg.note
+				m.selected = i
+				break
+			}
+		}
+		m.stage = m.editorBack
+		m.editorID = ""
+		m.draft.Blur()
+		if m.stage == readingStage {
+			m.resizeReader()
+		}
+		m.message = "Note updated."
+		return m, nil
+	case deletedNote:
+		m.busy = false
+		m.stage = inboxStage
+		m.deleteID = ""
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			m.message = "Delete not confirmed. Refresh Inbox before trying again."
+			return m, nil
+		}
+		for i, note := range m.notes {
+			if note.ID == msg.id {
+				m.notes = append(m.notes[:i], m.notes[i+1:]...)
+				if m.selected >= len(m.notes) && m.selected > 0 {
+					m.selected--
+				}
+				break
+			}
+		}
+		m.message = "Note permanently deleted."
+		return m, nil
 	case startResult:
 		m.busy = false
 		if msg.err != nil {
@@ -353,6 +440,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			if m.stage == captureStage && !m.busy && m.draft.Value() != m.editorStart {
+				m.stage = discardStage
+				m.quitAfterDiscard = true
+				m.message = ""
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 		if m.busy {
@@ -361,10 +454,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "esc" {
 			switch m.stage {
 			case captureStage:
-				m.stage = inboxStage
-				m.draft.Blur()
-				m.draft.SetValue("")
-				m.message = "Draft discarded."
+				if m.draft.Value() != m.editorStart {
+					m.stage = discardStage
+					m.quitAfterDiscard = false
+					m.message = ""
+					return m, nil
+				}
+				m.closeEditor("No changes saved.")
+				return m, nil
+			case discardStage:
+				m.stage = captureStage
+				m.quitAfterDiscard = false
+				return m, nil
+			case deleteStage:
+				m.stage = m.deleteBack
+				m.deleteID = ""
 				return m, nil
 			case startupStage:
 				m.stage = emailStage
@@ -469,10 +573,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "No more notes to load."
 				return m, nil
 			case "n":
-				m.stage = captureStage
-				m.draft.SetValue("")
-				m.message = ""
-				return m, m.draft.Focus()
+				return m, m.openEditor("", "", inboxStage)
+			case "e":
+				if len(m.notes) > 0 {
+					note := m.notes[m.selected]
+					return m, m.openEditor(note.ID, note.Content, inboxStage)
+				}
+			case "d":
+				if len(m.notes) > 0 {
+					m.deleteID = m.notes[m.selected].ID
+					m.deleteBack = inboxStage
+					m.stage = deleteStage
+					m.message = ""
+				}
 			case "q":
 				return m, tea.Quit
 			case "s":
@@ -504,8 +617,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case readingStage:
-			if msg.String() == "q" {
+			switch msg.String() {
+			case "q":
 				return m, tea.Quit
+			case "e":
+				note := m.notes[m.selected]
+				return m, m.openEditor(note.ID, note.Content, readingStage)
+			case "d":
+				m.deleteID = m.notes[m.selected].ID
+				m.deleteBack = readingStage
+				m.stage = deleteStage
+				m.message = ""
+				return m, nil
 			}
 			var cmd tea.Cmd
 			m.reader, cmd = m.reader.Update(msg)
@@ -513,6 +636,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case captureStage:
 			if msg.String() == "ctrl+s" {
 				content := m.draft.Value()
+				if m.editorID != "" && content == m.editorStart {
+					m.closeEditor("No changes to save.")
+					return m, nil
+				}
 				if strings.TrimSpace(content) == "" {
 					m.message = "Write something before saving."
 					return m, nil
@@ -523,6 +650,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.busy = true
 				m.message = "Saving note…"
+				if m.editorID != "" {
+					id := m.editorID
+					return m, func() tea.Msg {
+						note, err := m.api.UpdateNote(context.Background(), m.token, id, content)
+						return updatedNote{note, err}
+					}
+				}
 				return m, func() tea.Msg {
 					note, err := m.api.CreateInboxNote(context.Background(), m.token, content)
 					return createdNote{note, err}
@@ -534,6 +668,33 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = ""
 			}
 			return m, cmd
+		case discardStage:
+			switch msg.String() {
+			case "y":
+				if m.quitAfterDiscard {
+					return m, tea.Quit
+				}
+				m.closeEditor("Changes discarded.")
+			case "n":
+				m.stage = captureStage
+				m.quitAfterDiscard = false
+				return m, m.draft.Focus()
+			}
+			return m, nil
+		case deleteStage:
+			switch msg.String() {
+			case "n":
+				m.stage = m.deleteBack
+				m.deleteID = ""
+				return m, nil
+			case "y":
+				m.busy = true
+				id := m.deleteID
+				return m, func() tea.Msg {
+					return deletedNote{id: id, err: m.api.DeleteNote(context.Background(), m.token, id)}
+				}
+			}
+			return m, nil
 		}
 	}
 	if m.stage <= profileStage && !m.busy {
@@ -548,6 +709,25 @@ func (m *Model) focusInput(index int) {
 	m.inputs[m.focus].Blur()
 	m.focus = index
 	m.inputs[index].Focus()
+}
+
+func (m *Model) openEditor(id, content string, back stage) tea.Cmd {
+	m.editorID = id
+	m.editorStart = content
+	m.editorBack = back
+	m.draft.SetValue(content)
+	m.stage = captureStage
+	m.message = ""
+	return m.draft.Focus()
+}
+
+func (m *Model) closeEditor(message string) {
+	m.stage = m.editorBack
+	m.editorID = ""
+	m.editorStart = ""
+	m.draft.Blur()
+	m.draft.SetValue("")
+	m.message = message
 }
 
 func (m Model) verify(code, name, zone string) (tea.Model, tea.Cmd) {
@@ -570,7 +750,7 @@ func (m *Model) signedIn(token string) tea.Cmd {
 }
 
 func (m *Model) resizeReader() {
-	width := m.contentWidth()
+	width := m.innerWidth()
 	m.reader.Width = width
 	m.reader.Height = max(3, m.height-10)
 	if m.stage == readingStage && len(m.notes) > m.selected {
@@ -580,6 +760,12 @@ func (m *Model) resizeReader() {
 
 func (m Model) contentWidth() int {
 	return max(20, min(68, m.width-4))
+}
+
+// View adds two columns of padding on either side. Lip Gloss subtracts that
+// padding from Width before wrapping, so children must use the inner width.
+func (m Model) innerWidth() int {
+	return m.contentWidth() - 4
 }
 
 func cursorValue(cursor *string) string {
@@ -680,18 +866,44 @@ func (m Model) View() string {
 			if i == m.selected {
 				mark = "› "
 			}
-			body += fmt.Sprintf("%s%s  %s\n", mark, m.notes[i].CreatedAt.Local().Format("Jan 02"), preview(m.notes[i].Content, max(12, m.contentWidth()-16)))
+			body += fmt.Sprintf("%s%s  %s\n", mark, m.notes[i].CreatedAt.Local().Format("Jan 02"), preview(m.notes[i].Content, max(12, m.innerWidth()-16)))
 		}
 		if m.nextCursor != "" {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · m load older", len(m.notes))))
 		} else if len(m.notes) > 0 {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of Inbox", len(m.notes))))
 		}
-		body += "\n" + dimStyle.Render("n new · ↑/↓ or j/k select · Enter read · r newest · s sign in · q quit")
+		body += "\n" + dimStyle.Render("n new · e edit · d delete · ↑/↓ or j/k select · Enter read · r newest · s sign in · q quit")
 	case readingStage:
-		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("↑/↓ or j/k scroll · Esc back · q quit")
+		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("e edit · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
 	case captureStage:
-		body = "New Inbox note\n\n" + m.draft.View() + "\n\n" + dimStyle.Render("Enter new line · Ctrl+S save · Esc discard")
+		heading := "New Inbox note"
+		if m.editorID != "" {
+			heading = "Edit Inbox note"
+		}
+		status := "unchanged"
+		if m.editorID == "" {
+			status = "empty"
+		}
+		if m.draft.Value() != m.editorStart {
+			status = "unsaved"
+		}
+		body = fmt.Sprintf("%s\n\n%s\n\n%s\n%s", heading, m.draft.View(), dimStyle.Render(fmt.Sprintf("%d / 20,000 characters · %s", utf8.RuneCountInString(m.draft.Value()), status)), dimStyle.Render("Enter new line · Ctrl+S save · Esc back"))
+	case discardStage:
+		prompt := "Discard unsaved changes?"
+		if m.quitAfterDiscard {
+			prompt = "Discard unsaved changes and quit?"
+		}
+		body = prompt + "\n\n" + dimStyle.Render("y discard · n or Esc keep editing")
+	case deleteStage:
+		title := "this note"
+		for _, note := range m.notes {
+			if note.ID == m.deleteID {
+				title = preview(note.Content, 44)
+				break
+			}
+		}
+		body = "Permanently delete “" + title + "”?\nThere is no Trash and this cannot be undone.\n\n" + dimStyle.Render("y delete permanently · n or Esc cancel")
 	}
 	if m.busy {
 		body += "\n\nWorking…"

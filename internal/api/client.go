@@ -150,16 +150,35 @@ func (c *Client) CreateInboxNote(ctx context.Context, token, content string) (No
 	return result, err
 }
 
-func (c *Client) postAuthorized(ctx context.Context, path, token string, input, output any, expected int) error {
-	body, err := json.Marshal(input)
+func (c *Client) UpdateNote(ctx context.Context, token, id, content string) (Note, error) {
+	var result Note
+	err := c.writeNote(ctx, http.MethodPatch, "/v1/notes/"+url.PathEscape(id), token, map[string]string{"content": content}, &result, http.StatusOK)
+	if err == nil && result.ID != id {
+		err = errors.New("invalid API response: mismatched note ID")
+	}
+	return result, err
+}
+
+func (c *Client) DeleteNote(ctx context.Context, token, id string) error {
+	return c.writeNote(ctx, http.MethodDelete, "/v1/notes/"+url.PathEscape(id), token, nil, nil, http.StatusNoContent)
+}
+
+func (c *Client) writeNote(ctx context.Context, method, path, token string, input, output any, expected int) error {
+	var body io.Reader
+	if input != nil {
+		data, err := json.Marshal(input)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return err
+	if input != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "shortlog-cli")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -177,10 +196,16 @@ func (c *Client) postAuthorized(ctx context.Context, path, token string, input, 
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&envelope)
 		return &Error{Status: resp.StatusCode, Code: envelope.Error.Code}
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(output); err != nil {
-		return fmt.Errorf("invalid API response: %w", err)
+	if output != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(output); err != nil {
+			return fmt.Errorf("invalid API response: %w", err)
+		}
 	}
 	return nil
+}
+
+func (c *Client) postAuthorized(ctx context.Context, path, token string, input, output any, expected int) error {
+	return c.writeNote(ctx, http.MethodPost, path, token, input, output, expected)
 }
 
 func (c *Client) StartEmail(ctx context.Context, email string) (string, error) {

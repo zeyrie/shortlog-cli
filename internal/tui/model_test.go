@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"shortlog-cli/internal/api"
 )
 
@@ -26,6 +27,10 @@ type fakeAPI struct {
 	requested []string
 	createErr error
 	created   []string
+	updateErr error
+	updated   []string
+	deleteErr error
+	deleted   []string
 }
 
 type fakeStore struct {
@@ -80,6 +85,23 @@ func (f *fakeAPI) CreateInboxNote(_ context.Context, _, content string) (api.Not
 	note := api.Note{ID: "created", Content: content, CreatedAt: time.Now()}
 	f.notes = append([]api.Note{note}, f.notes...)
 	return note, nil
+}
+func (f *fakeAPI) UpdateNote(_ context.Context, _, id, content string) (api.Note, error) {
+	f.updated = append(f.updated, content)
+	if f.updateErr != nil {
+		return api.Note{}, f.updateErr
+	}
+	for i := range f.notes {
+		if f.notes[i].ID == id {
+			f.notes[i].Content = content
+			return f.notes[i], nil
+		}
+	}
+	return api.Note{ID: id, Content: content}, nil
+}
+func (f *fakeAPI) DeleteNote(_ context.Context, _, id string) error {
+	f.deleted = append(f.deleted, id)
+	return f.deleteErr
 }
 
 func press(m Model, key tea.KeyMsg) (Model, tea.Cmd) {
@@ -272,8 +294,12 @@ func TestQuickCaptureEmptyAndFailureRetainDraft(t *testing.T) {
 		t.Fatal("failed save lost draft")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != discardStage || m.draft.Value() != "Keep me" {
+		t.Fatal("Esc should confirm before discarding draft")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if m.stage != inboxStage || m.draft.Value() != "" {
-		t.Fatal("Esc did not discard draft")
+		t.Fatal("confirmed discard did not clear draft")
 	}
 }
 
@@ -366,5 +392,153 @@ func TestOlderPageFailurePreservesListAndCursor(t *testing.T) {
 	m = next.(Model)
 	if len(m.notes) != 2 || m.notes[1].ID != "older" || m.nextCursor != "" {
 		t.Fatal("retry did not append page")
+	}
+}
+
+func TestEditFromReaderUpdatesNoteWithoutReordering(t *testing.T) {
+	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "before", CreatedAt: time.Now()}, {ID: "two", Content: "second", CreatedAt: time.Now()}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if m.stage != captureStage || m.draft.Value() != "before" || m.editorID != "one" {
+		t.Fatal("editor did not load selected note")
+	}
+	m.draft.SetValue("after\nline")
+	if !strings.Contains(m.View(), "10 / 20,000 characters") || !strings.Contains(m.View(), "unsaved") {
+		t.Fatal("editor did not show character count and dirty status")
+	}
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil || len(f.updated) != 0 {
+		t.Fatal("edit not dispatched asynchronously")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != readingStage || m.busy || m.notes[0].Content != "after\nline" || m.notes[1].ID != "two" || !strings.Contains(m.View(), "after") || len(f.updated) != 1 {
+		t.Fatal("edit did not update reader and preserve list order")
+	}
+}
+
+func TestEditDiscardConfirmationAndNoOpSave(t *testing.T) {
+	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "original"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd != nil || len(f.updated) != 0 || m.stage != inboxStage {
+		t.Fatal("unchanged edit sent API request")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m.draft.SetValue("different")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != discardStage || len(f.updated) != 0 {
+		t.Fatal("Esc silently lost edits")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != captureStage || m.draft.Value() != "different" {
+		t.Fatal("cancel discard did not retain edits")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if m.stage != inboxStage || m.draft.Value() != "" || f.notes[0].Content != "original" {
+		t.Fatal("confirmed discard changed note")
+	}
+}
+
+func TestEditFailureRetainsDraft(t *testing.T) {
+	f := &fakeAPI{updateErr: &api.Error{Status: 404, Code: "not_found"}, notes: []api.Note{{ID: "one", Content: "old"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m.draft.SetValue("important changes")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != captureStage || m.draft.Value() != "important changes" || m.notes[0].Content != "old" || !strings.Contains(m.View(), "no longer available") {
+		t.Fatal("failed edit lost draft")
+	}
+}
+
+func TestDeleteRequiresConfirmationAndPreservesCursor(t *testing.T) {
+	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "first"}, {ID: "two", Content: "second"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
+	m.selected, m.nextCursor = 1, "older-cursor"
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.stage != deleteStage || !strings.Contains(m.View(), "no Trash") || len(f.deleted) != 0 {
+		t.Fatal("delete did not require confirmation")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != inboxStage || len(f.deleted) != 0 {
+		t.Fatal("cancel triggered deletion")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !m.busy || cmd == nil || len(f.deleted) != 0 {
+		t.Fatal("delete not asynchronous")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != inboxStage || len(m.notes) != 1 || m.notes[0].ID != "one" || m.selected != 0 || m.nextCursor != "older-cursor" || len(f.deleted) != 1 || f.deleted[0] != "two" {
+		t.Fatal("delete did not remove selected note while preserving pagination")
+	}
+}
+
+func TestDeleteFailureKeepsNote(t *testing.T) {
+	f := &fakeAPI{deleteErr: errors.New("connection lost"), notes: []api.Note{{ID: "one", Content: "first"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != inboxStage || len(m.notes) != 1 || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("delete failure removed note")
+	}
+}
+
+func TestQuitWithDirtyEditorNeedsConfirmation(t *testing.T) {
+	m := New(&fakeAPI{}, &fakeStore{})
+	m.stage, m.busy = inboxStage, false
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m.draft.SetValue("do not lose")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd != nil || m.stage != discardStage || !m.quitAfterDiscard {
+		t.Fatal("quit lost unsaved draft")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != captureStage || m.quitAfterDiscard || m.draft.Value() != "do not lose" {
+		t.Fatal("cancel quit lost draft")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("confirmed quit did not exit")
+	}
+}
+
+func TestEditorFitsPaddedLayoutWithoutBlackCursorLine(t *testing.T) {
+	m := New(&fakeAPI{}, &fakeStore{})
+	if _, ok := m.draft.FocusedStyle.CursorLine.GetBackground().(lipgloss.NoColor); !ok {
+		t.Fatal("focused editor line has a background color")
+	}
+	m.stage, m.busy = captureStage, false
+	m.draft.SetValue(strings.Repeat("x", m.innerWidth()-1))
+	m.draft.Focus()
+	for _, line := range strings.Split(m.draft.View(), "\n") {
+		if width := lipgloss.Width(line); width > m.innerWidth() {
+			t.Fatalf("textarea line width %d exceeds inner width %d", width, m.innerWidth())
+		}
+	}
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := lipgloss.Width(line); width > m.contentWidth() {
+			t.Fatalf("rendered line width %d exceeds frame width %d", width, m.contentWidth())
+		}
+	}
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 52, Height: 18})
+	m = next.(Model)
+	if m.draft.Width() != m.innerWidth() || m.reader.Width != m.innerWidth() {
+		t.Fatal("editor or reader width did not track resized inner content area")
 	}
 }

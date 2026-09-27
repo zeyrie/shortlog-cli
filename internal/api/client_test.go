@@ -186,3 +186,58 @@ func TestInboxCursorIsEncodedUnchanged(t *testing.T) {
 		t.Fatal("empty cursor silently refreshed first page")
 	}
 }
+
+func TestEditAndDeleteNote(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/notes/note-id" || r.Header.Get("Authorization") != "Bearer session" {
+			t.Errorf("unexpected request: %s, %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		switch r.Method {
+		case http.MethodPatch:
+			var fields map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+				t.Fatal(err)
+			}
+			if len(fields) != 1 || fields["content"] != "changed\nline" {
+				t.Errorf("patch fields: %v", fields)
+			}
+			_, _ = w.Write([]byte(`{"id":"note-id","content":"changed\nline","created_at":"2026-09-28T12:00:00Z"}`))
+		case http.MethodDelete:
+			if r.ContentLength > 0 {
+				t.Error("delete sent a body")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := client.UpdateNote(context.Background(), "session", "note-id", "changed\nline")
+	if err != nil || note.ID != "note-id" || note.Content != "changed\nline" {
+		t.Fatalf("patch: %+v, %v", note, err)
+	}
+	if err := client.DeleteNote(context.Background(), "session", "note-id"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+}
+
+func TestDeleteNotFoundIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Not found."}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.DeleteNote(context.Background(), "session", "missing")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound || apiErr.Code != "not_found" {
+		t.Fatalf("expected not found, got %v", err)
+	}
+}
