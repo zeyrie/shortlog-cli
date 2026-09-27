@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbletea"
 	"shortlog-cli/internal/api"
+	"shortlog-cli/internal/session"
 	"shortlog-cli/internal/tui"
 )
 
@@ -18,7 +19,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if _, err := tea.NewProgram(tui.New(client), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(tui.New(client, session.New(client.Origin())), tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "TUI failed:", err)
 		os.Exit(1)
 	}

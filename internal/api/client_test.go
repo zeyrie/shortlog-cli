@@ -92,3 +92,49 @@ func TestRejectsInvalidOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthenticatedInbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer saved-token" {
+			t.Errorf("unexpected auth request: %s %q", r.Method, r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/v1/me":
+			_, _ = w.Write([]byte(`{"id":"account","username":"Ari"}`))
+		case "/v1/notes":
+			_, _ = w.Write([]byte(`{"items":[{"id":"one","content":"Hello","created_at":"2026-09-28T12:00:00Z"}],"next_cursor":"later"}`))
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := client.Me(context.Background(), "saved-token")
+	if err != nil || account.Username != "Ari" {
+		t.Fatalf("me: %+v, %v", account, err)
+	}
+	page, err := client.Inbox(context.Background(), "saved-token")
+	if err != nil || len(page.Items) != 1 || page.Items[0].Content != "Hello" || page.NextCursor == nil {
+		t.Fatalf("inbox: %+v, %v", page, err)
+	}
+}
+
+func TestUnauthorizedSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"Authentication required."}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Me(context.Background(), "expired")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != 401 || apiErr.Code != "unauthorized" {
+		t.Fatalf("expected unauthorized: %v", err)
+	}
+}

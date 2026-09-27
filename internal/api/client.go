@@ -18,6 +18,8 @@ type Client struct {
 	http    *http.Client
 }
 
+func (c *Client) Origin() string { return c.baseURL }
+
 func NewClient(address string, httpClient *http.Client) (*Client, error) {
 	u, err := url.Parse(address)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
@@ -69,6 +71,65 @@ func (c *Client) post(ctx context.Context, path string, input, output any, expec
 		return fmt.Errorf("invalid API response: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) get(ctx context.Context, path, token string, output any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "shortlog-cli")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var envelope struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&envelope)
+		return &Error{Status: resp.StatusCode, Code: envelope.Error.Code}
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(output); err != nil {
+		return fmt.Errorf("invalid API response: %w", err)
+	}
+	return nil
+}
+
+type Account struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+}
+
+func (c *Client) Me(ctx context.Context, token string) (Account, error) {
+	var result Account
+	err := c.get(ctx, "/v1/me", token, &result)
+	if err == nil && result.ID == "" {
+		err = errors.New("invalid API response: missing account ID")
+	}
+	return result, err
+}
+
+type Note struct {
+	ID        string    `json:"id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type NotesPage struct {
+	Items      []Note  `json:"items"`
+	NextCursor *string `json:"next_cursor"`
+}
+
+func (c *Client) Inbox(ctx context.Context, token string) (NotesPage, error) {
+	var result NotesPage
+	err := c.get(ctx, "/v1/notes", token, &result)
+	return result, err
 }
 
 func (c *Client) StartEmail(ctx context.Context, email string) (string, error) {

@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"shortlog-cli/internal/api"
@@ -18,30 +20,47 @@ type emailAPI interface {
 	StartEmail(context.Context, string) (string, error)
 	VerifyEmail(context.Context, string, string, string, string) (api.VerifyResult, error)
 	RestoreEmail(context.Context, string) (string, error)
+	Me(context.Context, string) (api.Account, error)
+	Inbox(context.Context, string) (api.NotesPage, error)
+}
+
+type sessionStore interface {
+	Load() (string, error)
+	Save(string) error
+	Delete() error
 }
 
 type stage int
 
 const (
-	emailStage stage = iota
+	startupStage stage = iota
+	emailStage
 	codeStage
 	profileStage
 	restoreStage
-	signedInStage
+	inboxStage
+	readingStage
 )
 
 type Model struct {
 	api       emailAPI
+	store     sessionStore
 	stage     stage
 	inputs    [4]textinput.Model
 	focus     int
 	challenge string
 	ticket    string
-	token     string // Memory only; never rendered or logged.
+	token     string // Never rendered or logged.
 	email     string
+	username  string
+	notes     []api.Note
+	more      bool
+	selected  int
+	reader    viewport.Model
 	busy      bool
 	message   string
 	width     int
+	height    int
 }
 
 const (
@@ -51,8 +70,8 @@ const (
 	zoneInput
 )
 
-func New(client emailAPI) Model {
-	m := Model{api: client, width: 80}
+func New(client emailAPI, store sessionStore) Model {
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(68, 14)}
 	for i := range m.inputs {
 		m.inputs[i] = textinput.New()
 		m.inputs[i].CharLimit = 320
@@ -76,7 +95,12 @@ func New(client emailAPI) Model {
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return textinput.Blink }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, func() tea.Msg {
+		token, err := m.store.Load()
+		return loadedSession{token, err}
+	})
+}
 
 type startResult struct {
 	id  string
@@ -90,11 +114,88 @@ type restoreResult struct {
 	token string
 	err   error
 }
+type loadedSession struct {
+	token string
+	err   error
+}
+type inboxResult struct {
+	account api.Account
+	page    api.NotesPage
+	err     error
+	saveErr error
+}
+type clearedSession struct{ err error }
+
+func (m Model) loadInbox(token string, save bool) tea.Cmd {
+	return func() tea.Msg {
+		var saveErr error
+		if save {
+			saveErr = m.store.Save(token)
+			if saveErr != nil {
+				// Do not leave an older session saved under the same origin.
+				_ = m.store.Delete()
+			}
+		}
+		account, err := m.api.Me(context.Background(), token)
+		if err != nil {
+			return inboxResult{err: err, saveErr: saveErr}
+		}
+		page, err := m.api.Inbox(context.Background(), token)
+		return inboxResult{account: account, page: page, err: err, saveErr: saveErr}
+	}
+}
 
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeReader()
+		return m, nil
+	case loadedSession:
+		if msg.err != nil {
+			m.stage, m.busy = emailStage, false
+			m.message = "Credential store unavailable. Sign in; this session may not be saved."
+			return m, nil
+		}
+		if msg.token == "" {
+			m.stage, m.busy = emailStage, false
+			return m, nil
+		}
+		m.token = msg.token
+		m.message = "Checking saved session…"
+		return m, m.loadInbox(msg.token, false)
+	case clearedSession:
+		m.busy = false
+		if msg.err != nil {
+			m.message = "Could not remove the old saved session; it may reopen on next launch."
+		}
+		return m, nil
+	case inboxResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			m.stage = inboxStage
+			m.message = friendlyError(msg.err, "Could not load your Inbox.") + " Press r to retry."
+			return m, nil
+		}
+		m.stage = inboxStage
+		m.username = msg.account.Username
+		m.notes = msg.page.Items
+		m.more = msg.page.NextCursor != nil
+		m.selected = 0
+		m.message = ""
+		if msg.saveErr != nil {
+			m.message = "Could not save session to the OS credential store; you may need to sign in next time."
+		}
 		return m, nil
 	case startResult:
 		m.busy = false
@@ -127,7 +228,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.inputs[codeInput].SetValue("")
 			m.message = ""
 		} else {
-			m.signedIn(msg.result.Token)
+			return m, m.signedIn(msg.result.Token)
 		}
 		return m, nil
 	case restoreResult:
@@ -135,7 +236,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = friendlyError(msg.err, "Could not restore the account.")
 		} else {
-			m.signedIn(msg.token)
+			return m, m.signedIn(msg.token)
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -147,6 +248,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "esc" {
 			switch m.stage {
+			case startupStage:
+				m.stage = emailStage
+				m.token = ""
+				m.focusInput(emailInput)
 			case codeStage:
 				m.stage = emailStage
 				m.challenge = ""
@@ -158,8 +263,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.ticket = ""
 				m.stage = emailStage
 				m.focusInput(emailInput)
-			case signedInStage:
-				return m, tea.Quit
+			case readingStage:
+				m.stage = inboxStage
+				return m, nil
 			}
 			m.message = ""
 			return m, nil
@@ -225,11 +331,50 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "Restoration cancelled."
 			}
 			return m, nil
-		case signedInStage:
-			if msg.String() == "q" || msg.String() == "enter" {
+		case startupStage:
+			if msg.String() == "r" && m.token != "" {
+				m.busy = true
+				return m, m.loadInbox(m.token, false)
+			}
+		case inboxStage:
+			switch msg.String() {
+			case "q":
 				return m, tea.Quit
+			case "s":
+				m.stage = emailStage
+				m.token = ""
+				m.notes = nil
+				m.busy = true
+				m.message = "Removing saved session…"
+				m.focusInput(emailInput)
+				return m, func() tea.Msg { return clearedSession{m.store.Delete()} }
+			case "r":
+				m.busy = true
+				return m, m.loadInbox(m.token, false)
+			case "j", "down":
+				if m.selected+1 < len(m.notes) {
+					m.selected++
+				}
+			case "k", "up":
+				if m.selected > 0 {
+					m.selected--
+				}
+			case "enter":
+				if len(m.notes) > 0 {
+					m.stage = readingStage
+					m.resizeReader()
+					m.reader.SetContent(lipgloss.NewStyle().Width(m.reader.Width).Render(safeText(m.notes[m.selected].Content)))
+					m.reader.GotoTop()
+				}
 			}
 			return m, nil
+		case readingStage:
+			if msg.String() == "q" {
+				return m, tea.Quit
+			}
+			var cmd tea.Cmd
+			m.reader, cmd = m.reader.Update(msg)
+			return m, cmd
 		}
 	}
 	if m.stage <= profileStage && !m.busy {
@@ -254,13 +399,54 @@ func (m Model) verify(code, name, zone string) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) signedIn(token string) {
+func (m *Model) signedIn(token string) tea.Cmd {
 	m.token = token
 	m.ticket = ""
 	m.challenge = ""
 	m.inputs[codeInput].SetValue("")
-	m.stage = signedInStage
-	m.message = "Signed in. Notes and projects are coming next; this session is not saved yet."
+	m.stage = inboxStage
+	m.busy = true
+	m.message = "Loading Inbox…"
+	return m.loadInbox(token, true)
+}
+
+func (m *Model) resizeReader() {
+	width := m.contentWidth()
+	m.reader.Width = width
+	m.reader.Height = max(3, m.height-10)
+	if m.stage == readingStage && len(m.notes) > m.selected {
+		m.reader.SetContent(lipgloss.NewStyle().Width(width).Render(safeText(m.notes[m.selected].Content)))
+	}
+}
+
+func (m Model) contentWidth() int {
+	return max(20, min(68, m.width-4))
+}
+
+// Notes are untrusted terminal text; remove control sequences before rendering.
+func safeText(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+func preview(text string, limit int) string {
+	first, _, _ := strings.Cut(safeText(text), "\n")
+	first = strings.TrimSpace(first)
+	runes := []rune(first)
+	if len(runes) > limit {
+		return string(runes[:limit-1]) + "…"
+	}
+	return first
 }
 
 func eightDigits(code string) bool {
@@ -302,6 +488,8 @@ var (
 func (m Model) View() string {
 	var body string
 	switch m.stage {
+	case startupStage:
+		body = "Checking saved session…\n\n" + dimStyle.Render("Ctrl+C quit")
 	case emailStage:
 		body = "Sign in with email\n\nEmail\n" + m.inputs[emailInput].View() + "\n\n" + dimStyle.Render("Enter send code · Ctrl+C quit")
 	case codeStage:
@@ -310,8 +498,30 @@ func (m Model) View() string {
 		body = "Finish creating your account\n\nName\n" + m.inputs[usernameInput].View() + "\n\nTime zone (IANA)\n" + m.inputs[zoneInput].View() + "\n\n" + dimStyle.Render("Tab switch field · Enter verify · Esc back")
 	case restoreStage:
 		body = "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
-	case signedInStage:
-		body = "Email sign-in complete.\n\n" + dimStyle.Render("Enter or q to quit")
+	case inboxStage:
+		body = "Inbox"
+		if m.username != "" {
+			body += " · " + safeText(m.username)
+		}
+		body += "\n\n"
+		if len(m.notes) == 0 && !m.busy && m.message == "" {
+			body += "No Inbox notes yet.\n"
+		}
+		rows := max(3, m.height-11)
+		start := max(0, m.selected-rows+1)
+		for i := start; i < len(m.notes) && i < start+rows; i++ {
+			mark := "  "
+			if i == m.selected {
+				mark = "› "
+			}
+			body += fmt.Sprintf("%s%s  %s\n", mark, m.notes[i].CreatedAt.Local().Format("Jan 02"), preview(m.notes[i].Content, max(12, m.contentWidth()-16)))
+		}
+		if m.more {
+			body += "\n" + dimStyle.Render("Showing newest 50 notes; older pages are not available yet.")
+		}
+		body += "\n" + dimStyle.Render("↑/↓ or j/k select · Enter read · r refresh · s sign in · q quit")
+	case readingStage:
+		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("↑/↓ or j/k scroll · Esc back · q quit")
 	}
 	if m.busy {
 		body += "\n\nWorking…"
@@ -320,12 +530,6 @@ func (m Model) View() string {
 		body += "\n\n" + errStyle.Render(m.message)
 	}
 	content := titleStyle.Render("Shortlog") + "\n\n" + body
-	width := m.width - 4
-	if width < 20 {
-		width = 20
-	}
-	if width > 68 {
-		width = 68
-	}
+	width := m.contentWidth()
 	return lipgloss.NewStyle().Width(width).Padding(1, 2).Render(content)
 }
