@@ -12,14 +12,16 @@ import (
 )
 
 type fakeAPI struct {
-	starts   int
-	verifies int
-	restores int
-	name     string
-	zone     string
-	meErr    error
-	inboxErr error
-	notes    []api.Note
+	starts    int
+	verifies  int
+	restores  int
+	name      string
+	zone      string
+	meErr     error
+	inboxErr  error
+	notes     []api.Note
+	createErr error
+	created   []string
 }
 
 type fakeStore struct {
@@ -61,6 +63,15 @@ func (f *fakeAPI) Me(_ context.Context, _ string) (api.Account, error) {
 }
 func (f *fakeAPI) Inbox(_ context.Context, _ string) (api.NotesPage, error) {
 	return api.NotesPage{Items: f.notes}, f.inboxErr
+}
+func (f *fakeAPI) CreateInboxNote(_ context.Context, _, content string) (api.Note, error) {
+	f.created = append(f.created, content)
+	if f.createErr != nil {
+		return api.Note{}, f.createErr
+	}
+	note := api.Note{ID: "created", Content: content, CreatedAt: time.Now()}
+	f.notes = append([]api.Note{note}, f.notes...)
+	return note, nil
 }
 
 func press(m Model, key tea.KeyMsg) (Model, tea.Cmd) {
@@ -203,5 +214,77 @@ func TestNetworkErrorKeepsSavedSession(t *testing.T) {
 func TestSanitizeNoteContent(t *testing.T) {
 	if got := safeText("ok\x1b[31m\nnext"); got != "ok[31m\nnext" {
 		t.Fatalf("unsafe text: %q", got)
+	}
+}
+
+func TestQuickCaptureAndRefresh(t *testing.T) {
+	f := &fakeAPI{notes: []api.Note{{ID: "older", Content: "older", CreatedAt: time.Now()}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != captureStage || cmd == nil {
+		t.Fatal("n did not open quick capture")
+	}
+	m.draft.SetValue("first line\nsecond line")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(m.draft.Value(), "second line\n") {
+		t.Fatal("Enter did not insert a newline")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if !m.busy || cmd == nil || len(f.created) != 0 {
+		t.Fatal("save did not start asynchronously")
+	}
+	next, refresh := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != inboxStage || m.draft.Value() != "" || len(f.created) != 1 || f.created[0] != "first line\nsecond line\n" || refresh == nil {
+		t.Fatalf("save: stage=%d, drafts=%q, created=%v", m.stage, m.draft.Value(), f.created)
+	}
+	next, _ = m.Update(refresh())
+	m = next.(Model)
+	if m.busy || m.notes[m.selected].ID != "created" || !strings.Contains(m.View(), "Note saved") {
+		t.Fatal("new note was not selected after refresh")
+	}
+}
+
+func TestQuickCaptureEmptyAndFailureRetainDraft(t *testing.T) {
+	f := &fakeAPI{createErr: &api.Error{Status: 503, Code: "service_unavailable"}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m.draft.SetValue(" \n ")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd != nil || len(f.created) != 0 {
+		t.Fatal("blank note submitted")
+	}
+	m.draft.SetValue("Keep me")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != captureStage || m.busy || m.draft.Value() != "Keep me" || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("failed save lost draft")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != inboxStage || m.draft.Value() != "" {
+		t.Fatal("Esc did not discard draft")
+	}
+}
+
+func TestQuickCaptureUnauthorizedResumesAfterSignIn(t *testing.T) {
+	f := &fakeAPI{createErr: &api.Error{Status: 401, Code: "unauthorized"}}
+	s := &fakeStore{token: "expired"}
+	m := New(f, s)
+	m.stage, m.busy, m.token = captureStage, false, "expired"
+	m.draft.SetValue("Unsent note")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || !m.resumeDraft || m.draft.Value() != "Unsent note" || s.token != "" {
+		t.Fatal("expired session lost draft")
+	}
+	cmd = m.signedIn("new-token")
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != captureStage || m.draft.Value() != "Unsent note" || m.resumeDraft {
+		t.Fatal("did not resume draft")
 	}
 }

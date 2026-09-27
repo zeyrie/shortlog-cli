@@ -138,3 +138,29 @@ func TestUnauthorizedSession(t *testing.T) {
 		t.Fatalf("expected unauthorized: %v", err)
 	}
 }
+
+func TestCreateInboxNote(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/notes" || r.Header.Get("Authorization") != "Bearer session" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var input map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if len(input) != 1 || input["content"] != "First\nSecond" {
+			t.Errorf("content: %#v", input)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"new-note","content":"First\nSecond","created_at":"2026-09-28T12:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := client.CreateInboxNote(context.Background(), "session", "First\nSecond")
+	if err != nil || note.ID != "new-note" || note.Content != "First\nSecond" {
+		t.Fatalf("create: %+v, %v", note, err)
+	}
+}

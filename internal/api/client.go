@@ -132,6 +132,48 @@ func (c *Client) Inbox(ctx context.Context, token string) (NotesPage, error) {
 	return result, err
 }
 
+func (c *Client) CreateInboxNote(ctx context.Context, token, content string) (Note, error) {
+	var result Note
+	err := c.postAuthorized(ctx, "/v1/notes", token, map[string]string{"content": content}, &result, http.StatusCreated)
+	if err == nil && result.ID == "" {
+		err = errors.New("invalid API response: missing note ID")
+	}
+	return result, err
+}
+
+func (c *Client) postAuthorized(ctx context.Context, path, token string, input, output any, expected int) error {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "shortlog-cli")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != expected {
+		var envelope struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&envelope)
+		return &Error{Status: resp.StatusCode, Code: envelope.Error.Code}
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(output); err != nil {
+		return fmt.Errorf("invalid API response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) StartEmail(ctx context.Context, email string) (string, error) {
 	var result struct {
 		ChallengeID string `json:"challenge_id"`

@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,6 +24,7 @@ type emailAPI interface {
 	RestoreEmail(context.Context, string) (string, error)
 	Me(context.Context, string) (api.Account, error)
 	Inbox(context.Context, string) (api.NotesPage, error)
+	CreateInboxNote(context.Context, string, string) (api.Note, error)
 }
 
 type sessionStore interface {
@@ -40,27 +43,31 @@ const (
 	restoreStage
 	inboxStage
 	readingStage
+	captureStage
 )
 
 type Model struct {
-	api       emailAPI
-	store     sessionStore
-	stage     stage
-	inputs    [4]textinput.Model
-	focus     int
-	challenge string
-	ticket    string
-	token     string // Never rendered or logged.
-	email     string
-	username  string
-	notes     []api.Note
-	more      bool
-	selected  int
-	reader    viewport.Model
-	busy      bool
-	message   string
-	width     int
-	height    int
+	api         emailAPI
+	store       sessionStore
+	stage       stage
+	inputs      [4]textinput.Model
+	focus       int
+	challenge   string
+	ticket      string
+	token       string // Never rendered or logged.
+	email       string
+	username    string
+	notes       []api.Note
+	more        bool
+	selected    int
+	reader      viewport.Model
+	draft       textarea.Model
+	resumeDraft bool
+	selectID    string
+	busy        bool
+	message     string
+	width       int
+	height      int
 }
 
 const (
@@ -72,6 +79,12 @@ const (
 
 func New(client emailAPI, store sessionStore) Model {
 	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(68, 14)}
+	m.draft = textarea.New()
+	m.draft.Placeholder = "What's on your mind?"
+	m.draft.CharLimit = 20000
+	m.draft.ShowLineNumbers = false
+	m.draft.SetWidth(68)
+	m.draft.SetHeight(12)
 	for i := range m.inputs {
 		m.inputs[i] = textinput.New()
 		m.inputs[i].CharLimit = 320
@@ -125,6 +138,10 @@ type inboxResult struct {
 	saveErr error
 }
 type clearedSession struct{ err error }
+type createdNote struct {
+	note api.Note
+	err  error
+}
 
 func (m Model) loadInbox(token string, save bool) tea.Cmd {
 	return func() tea.Msg {
@@ -151,6 +168,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeReader()
+		m.draft.SetWidth(m.contentWidth())
+		m.draft.SetHeight(max(3, m.height-10))
 		return m, nil
 	case loadedSession:
 		if msg.err != nil {
@@ -184,7 +203,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.stage = inboxStage
-			m.message = friendlyError(msg.err, "Could not load your Inbox.") + " Press r to retry."
+			if m.selectID != "" {
+				m.message = "Note saved, but Inbox refresh failed. Press r to retry."
+			} else {
+				m.message = friendlyError(msg.err, "Could not load your Inbox.") + " Press r to retry."
+			}
 			return m, nil
 		}
 		m.stage = inboxStage
@@ -193,10 +216,54 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.more = msg.page.NextCursor != nil
 		m.selected = 0
 		m.message = ""
+		if m.selectID != "" {
+			for i, note := range m.notes {
+				if note.ID == m.selectID {
+					m.selected = i
+					break
+				}
+			}
+			m.selectID = ""
+			m.message = "Note saved to Inbox."
+		}
 		if msg.saveErr != nil {
 			m.message = "Could not save session to the OS credential store; you may need to sign in next time."
 		}
+		if m.resumeDraft {
+			m.resumeDraft = false
+			m.stage = captureStage
+			m.message = "Sign-in complete. Your unsaved draft is ready."
+			return m, m.draft.Focus()
+		}
 		return m, nil
+	case createdNote:
+		if msg.err != nil {
+			m.busy = false
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.resumeDraft = true
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again to resume your draft."
+				return m, nil
+			}
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				m.message = "The server rejected this note. Check its content and try again."
+			} else {
+				m.message = "Save not confirmed. Check Inbox before retrying to avoid a duplicate. Your draft is still here."
+			}
+			return m, nil
+		}
+		m.stage = inboxStage
+		m.selectID = msg.note.ID
+		m.notes = append([]api.Note{msg.note}, m.notes...)
+		m.selected = 0
+		m.draft.SetValue("")
+		m.draft.Blur()
+		m.message = "Note saved. Refreshing Inbox…"
+		return m, m.loadInbox(m.token, false)
 	case startResult:
 		m.busy = false
 		if msg.err != nil {
@@ -248,6 +315,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "esc" {
 			switch m.stage {
+			case captureStage:
+				m.stage = inboxStage
+				m.draft.Blur()
+				m.draft.SetValue("")
+				m.message = "Draft discarded."
+				return m, nil
 			case startupStage:
 				m.stage = emailStage
 				m.token = ""
@@ -338,6 +411,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case inboxStage:
 			switch msg.String() {
+			case "n":
+				m.stage = captureStage
+				m.draft.SetValue("")
+				m.message = ""
+				return m, m.draft.Focus()
 			case "q":
 				return m, tea.Quit
 			case "s":
@@ -374,6 +452,30 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.reader, cmd = m.reader.Update(msg)
+			return m, cmd
+		case captureStage:
+			if msg.String() == "ctrl+s" {
+				content := m.draft.Value()
+				if strings.TrimSpace(content) == "" {
+					m.message = "Write something before saving."
+					return m, nil
+				}
+				if utf8.RuneCountInString(content) > 20000 {
+					m.message = "Notes must be at most 20,000 characters."
+					return m, nil
+				}
+				m.busy = true
+				m.message = "Saving note…"
+				return m, func() tea.Msg {
+					note, err := m.api.CreateInboxNote(context.Background(), m.token, content)
+					return createdNote{note, err}
+				}
+			}
+			var cmd tea.Cmd
+			m.draft, cmd = m.draft.Update(msg)
+			if m.message != "" {
+				m.message = ""
+			}
 			return m, cmd
 		}
 	}
@@ -519,9 +621,11 @@ func (m Model) View() string {
 		if m.more {
 			body += "\n" + dimStyle.Render("Showing newest 50 notes; older pages are not available yet.")
 		}
-		body += "\n" + dimStyle.Render("↑/↓ or j/k select · Enter read · r refresh · s sign in · q quit")
+		body += "\n" + dimStyle.Render("n new · ↑/↓ or j/k select · Enter read · r refresh · s sign in · q quit")
 	case readingStage:
 		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("↑/↓ or j/k scroll · Esc back · q quit")
+	case captureStage:
+		body = "New Inbox note\n\n" + m.draft.View() + "\n\n" + dimStyle.Render("Enter new line · Ctrl+S save · Esc discard")
 	}
 	if m.busy {
 		body += "\n\nWorking…"
