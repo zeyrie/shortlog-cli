@@ -20,6 +20,9 @@ import (
 
 type emailAPI interface {
 	StartEmail(context.Context, string) (string, error)
+	StartTelegram(context.Context) (api.TelegramStart, error)
+	PollTelegram(context.Context, string, string, string, string) (api.VerifyResult, error)
+	RestoreTelegram(context.Context, string) (string, error)
 	VerifyEmail(context.Context, string, string, string, string) (api.VerifyResult, error)
 	RestoreEmail(context.Context, string) (string, error)
 	Me(context.Context, string) (api.Account, error)
@@ -74,6 +77,7 @@ const (
 	accountEditStage
 	accountDiscardStage
 	accountDeleteStage
+	telegramStage
 )
 
 type sessionAction int
@@ -97,54 +101,61 @@ type noteList struct {
 }
 
 type Model struct {
-	api               emailAPI
-	store             sessionStore
-	stage             stage
-	inputs            [8]textinput.Model
-	focus             int
-	challenge         string
-	ticket            string
-	token             string // Never rendered or logged.
-	email             string
-	username          string
-	account           api.Account
-	accountBack       stage
-	accountStartName  string
-	accountStartZone  string
-	notes             []api.Note
-	inboxList         noteList
-	activeProject     *api.Project
-	inboxStashed      bool
-	inboxNeedsRefresh bool
-	projects          []api.Project
-	projectSelected   int
-	showArchived      bool
-	archiveID         string
-	sessions          []api.Session
-	sessionSelected   int
-	sessionBack       stage
-	sessionAction     sessionAction
-	sessionID         string
-	nextCursor        string
-	selected          int
-	reader            viewport.Model
-	draft             textarea.Model
-	editorID          string
-	editorStart       string
-	editorBack        stage
-	deleteID          string
-	deleteBack        stage
-	moveID            string
-	moveBack          stage
-	moveTargets       []moveTarget
-	moveSelected      int
-	quitAfterDiscard  bool
-	resumeDraft       bool
-	selectID          string
-	busy              bool
-	message           string
-	width             int
-	height            int
+	api                emailAPI
+	store              sessionStore
+	stage              stage
+	inputs             [8]textinput.Model
+	focus              int
+	challenge          string
+	ticket             string
+	telegramLogin      bool
+	telegramAttempt    string
+	telegramSecret     string
+	telegramURL        string
+	telegramExpires    time.Time
+	telegramGeneration uint64
+	openBrowser        func(string) error
+	token              string // Never rendered or logged.
+	email              string
+	username           string
+	account            api.Account
+	accountBack        stage
+	accountStartName   string
+	accountStartZone   string
+	notes              []api.Note
+	inboxList          noteList
+	activeProject      *api.Project
+	inboxStashed       bool
+	inboxNeedsRefresh  bool
+	projects           []api.Project
+	projectSelected    int
+	showArchived       bool
+	archiveID          string
+	sessions           []api.Session
+	sessionSelected    int
+	sessionBack        stage
+	sessionAction      sessionAction
+	sessionID          string
+	nextCursor         string
+	selected           int
+	reader             viewport.Model
+	draft              textarea.Model
+	editorID           string
+	editorStart        string
+	editorBack         stage
+	deleteID           string
+	deleteBack         stage
+	moveID             string
+	moveBack           stage
+	moveTargets        []moveTarget
+	moveSelected       int
+	quitAfterDiscard   bool
+	resumeDraft        bool
+	selectID           string
+	busy               bool
+	message            string
+	width              int
+	height             int
 }
 
 const (
@@ -159,7 +170,7 @@ const (
 )
 
 func New(client emailAPI, store sessionStore) Model {
-	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14)}
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14), openBrowser: openTelegramBrowser}
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
 	m.draft.CharLimit = 20000
@@ -218,6 +229,23 @@ type verifyResult struct {
 type restoreResult struct {
 	token string
 	err   error
+}
+type telegramStartResult struct {
+	start api.TelegramStart
+	err   error
+}
+type telegramPollResult struct {
+	attempt string
+	result  api.VerifyResult
+	err     error
+}
+type telegramTick struct {
+	attempt    string
+	generation uint64
+}
+type telegramBrowserResult struct {
+	attempt string
+	err     error
 }
 type loadedSession struct {
 	token string
@@ -351,6 +379,37 @@ func (m *Model) finishSession() {
 	}
 }
 
+func (m *Model) clearTelegram() {
+	m.telegramLogin = false
+	m.telegramAttempt = ""
+	m.telegramSecret = ""
+	m.telegramURL = ""
+	m.telegramExpires = time.Time{}
+	m.telegramGeneration++
+	m.ticket = ""
+}
+
+func (m Model) telegramTimer() tea.Cmd {
+	attempt := m.telegramAttempt
+	generation := m.telegramGeneration
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return telegramTick{attempt, generation} })
+}
+
+func (m *Model) pollTelegram(name, zone string) tea.Cmd {
+	if !time.Now().Before(m.telegramExpires) {
+		m.message = "Telegram attempt expired. Press Esc then t to start again."
+		return nil
+	}
+	m.busy = true
+	m.telegramGeneration++
+	m.message = "Checking Telegram approval…"
+	id, secret := m.telegramAttempt, m.telegramSecret
+	return func() tea.Msg {
+		result, err := m.api.PollTelegram(context.Background(), id, secret, name, zone)
+		return telegramPollResult{id, result, err}
+	}
+}
+
 func (m *Model) openAccount(back stage) tea.Cmd {
 	m.accountBack = back
 	m.account = api.Account{}
@@ -423,6 +482,88 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.token = msg.token
 		m.message = "Checking saved session…"
 		return m, m.loadInbox(msg.token, false)
+	case telegramStartResult:
+		m.busy = false
+		if msg.err != nil {
+			m.clearTelegram()
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
+				m.message = "Telegram sign-in unavailable. Configure Telegram on the server or use email."
+			} else {
+				m.message = friendlyError(msg.err, "Could not start Telegram sign-in.")
+			}
+			return m, nil
+		}
+		if !validTelegramURL(msg.start.AuthorizationURL) {
+			m.clearTelegram()
+			m.message = "Server returned an unsafe Telegram sign-in URL. Sign-in was cancelled."
+			return m, nil
+		}
+		m.telegramLogin = true
+		m.telegramAttempt = msg.start.AttemptID
+		m.telegramSecret = msg.start.PollSecret
+		m.telegramURL = msg.start.AuthorizationURL
+		m.telegramExpires = time.Now().Add(10 * time.Minute)
+		m.stage = telegramStage
+		m.message = "Approve sign-in in your browser; this screen checks automatically."
+		id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
+		return m, tea.Batch(m.telegramTimer(), func() tea.Msg {
+			return telegramBrowserResult{id, opener(address)}
+		})
+	case telegramBrowserResult:
+		if m.stage == telegramStage && m.telegramAttempt == msg.attempt && msg.err != nil {
+			m.message = "Could not open the browser. Press o to retry, or copy the URL below into your browser."
+		}
+		return m, nil
+	case telegramTick:
+		if m.stage != telegramStage || m.telegramAttempt != msg.attempt || m.telegramGeneration != msg.generation || m.busy {
+			return m, nil
+		}
+		return m, m.pollTelegram("", "")
+	case telegramPollResult:
+		if m.telegramAttempt != msg.attempt || (!m.telegramLogin) || (m.stage != telegramStage && m.stage != profileStage) {
+			return m, nil
+		}
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
+				m.stage = profileStage
+				m.focusInput(usernameInput)
+				m.message = "New Telegram account: enter a name and IANA time zone."
+				return m, nil
+			}
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				if m.stage == profileStage {
+					m.message = "Server rejected the profile or attempt. Check your details; if expired, press Esc and start again."
+				} else {
+					m.message = "Telegram attempt expired or invalid. Press Esc then Ctrl+T to start again."
+				}
+			} else if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
+				m.message = "Telegram sign-in is temporarily unavailable. Press r to retry or Esc to cancel."
+			} else {
+				m.message = friendlyError(msg.err, "Could not check Telegram approval.") + " Press r to retry."
+			}
+			return m, nil
+		}
+		switch msg.result.Status {
+		case "pending":
+			if m.stage == profileStage {
+				m.message = "Still waiting for Telegram approval. Press Enter to check again."
+				return m, nil
+			}
+			m.message = "Waiting for Telegram approval… Press r to check now or Esc to cancel."
+			return m, m.telegramTimer()
+		case "restore_required":
+			m.stage = restoreStage
+			m.ticket = msg.result.RecoveryTicket
+			m.message = ""
+			return m, nil
+		case "signed_in":
+			m.clearTelegram()
+			return m, m.signedIn(msg.result.Token)
+		}
+		return m, nil
 	case accountResult:
 		m.busy = false
 		if msg.err != nil {
@@ -890,8 +1031,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case restoreResult:
 		m.busy = false
 		if msg.err != nil {
-			m.message = friendlyError(msg.err, "Could not restore the account.")
+			var apiErr *api.Error
+			if m.telegramLogin && errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				m.message = "Telegram restoration expired or was already used. Press Esc then Ctrl+T to start again."
+			} else {
+				m.message = friendlyError(msg.err, "Could not restore the account.")
+			}
 		} else {
+			m.clearTelegram()
 			return m, m.signedIn(msg.token)
 		}
 		return m, nil
@@ -904,6 +1051,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, tea.Quit
+		}
+		if msg.String() == "esc" && m.stage == telegramStage {
+			m.clearTelegram()
+			m.stage = emailStage
+			m.busy = false
+			m.message = "Telegram sign-in cancelled."
+			m.focusInput(emailInput)
+			return m, nil
 		}
 		if m.busy {
 			return m, nil
@@ -942,10 +1097,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.challenge = ""
 				m.focusInput(emailInput)
 			case profileStage:
-				m.stage = codeStage
-				m.focusInput(codeInput)
+				if m.telegramLogin {
+					m.clearTelegram()
+					m.stage = emailStage
+					m.focusInput(emailInput)
+				} else {
+					m.stage = codeStage
+					m.focusInput(codeInput)
+				}
 			case restoreStage:
-				m.ticket = ""
+				m.clearTelegram()
 				m.stage = emailStage
 				m.focusInput(emailInput)
 			case readingStage:
@@ -1010,7 +1171,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch m.stage {
 		case emailStage:
+			if msg.String() == "ctrl+t" {
+				m.clearTelegram()
+				m.busy = true
+				m.message = "Starting Telegram sign-in…"
+				return m, func() tea.Msg {
+					start, err := m.api.StartTelegram(context.Background())
+					return telegramStartResult{start, err}
+				}
+			}
 			if msg.String() == "enter" {
+				m.clearTelegram()
 				address := strings.TrimSpace(m.inputs[emailInput].Value())
 				if address == "" || !strings.Contains(address, "@") {
 					m.message = "Enter a valid email address."
@@ -1051,6 +1222,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.message = "Enter a valid IANA time zone (for example, Europe/London)."
 					return m, nil
 				}
+				if m.telegramLogin {
+					return m, m.pollTelegram(name, zone)
+				}
 				return m.verify(m.inputs[codeInput].Value(), name, zone)
 			}
 		case restoreStage:
@@ -1059,14 +1233,29 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.busy, m.message = true, ""
 				ticket := m.ticket
 				return m, func() tea.Msg {
-					token, err := m.api.RestoreEmail(context.Background(), ticket)
+					var token string
+					var err error
+					if m.telegramLogin {
+						token, err = m.api.RestoreTelegram(context.Background(), ticket)
+					} else {
+						token, err = m.api.RestoreEmail(context.Background(), ticket)
+					}
 					return restoreResult{token, err}
 				}
 			case "n":
-				m.ticket = ""
+				m.clearTelegram()
 				m.stage = emailStage
 				m.focusInput(emailInput)
 				m.message = "Restoration cancelled."
+			}
+			return m, nil
+		case telegramStage:
+			switch msg.String() {
+			case "r":
+				return m, m.pollTelegram("", "")
+			case "o":
+				id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
+				return m, func() tea.Msg { return telegramBrowserResult{id, opener(address)} }
 			}
 			return m, nil
 		case startupStage:
@@ -1746,11 +1935,16 @@ func (m Model) View() string {
 	case startupStage:
 		body = "Checking saved session…\n\n" + dimStyle.Render("Ctrl+C quit")
 	case emailStage:
-		body = "Sign in with email\n\nEmail\n" + m.inputs[emailInput].View() + "\n\n" + dimStyle.Render("Enter send code · Ctrl+C quit")
+		body = "Sign in\n\nEmail\n" + m.inputs[emailInput].View() + "\n\n" + dimStyle.Render("Enter send email code · Ctrl+T sign in with Telegram · Ctrl+C quit")
+	case telegramStage:
+		body = "Sign in with Telegram\n\nApprove access in your browser. This attempt expires in about 10 minutes.\n\n" + dimStyle.Render("r check now · o reopen browser · Esc cancel")
+		if strings.Contains(m.message, "Could not open the browser") {
+			body += "\n\nOpen manually: " + safeText(m.telegramURL)
+		}
 	case codeStage:
 		body = fmt.Sprintf("Code sent to %s\n\n8-digit code\n%s\n\n%s", m.email, m.inputs[codeInput].View(), dimStyle.Render("Enter verify · Esc change email · Ctrl+C quit"))
 	case profileStage:
-		body = "Finish creating your account\n\nName\n" + m.inputs[usernameInput].View() + "\n\nTime zone (IANA)\n" + m.inputs[zoneInput].View() + "\n\n" + dimStyle.Render("Tab switch field · Enter verify · Esc back")
+		body = "Finish creating your account\n\nName\n" + m.inputs[usernameInput].View() + "\n\nTime zone (IANA)\n" + m.inputs[zoneInput].View() + "\n\n" + dimStyle.Render("Tab switch field · Enter continue · Esc cancel/back")
 	case restoreStage:
 		body = "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
 	case inboxStage:

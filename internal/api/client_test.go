@@ -501,3 +501,81 @@ func TestAccountSettingsEndpoints(t *testing.T) {
 		t.Fatalf("deletion: %v %v", deadline, err)
 	}
 }
+
+func TestTelegramLoginEndpoints(t *testing.T) {
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("Telegram login must not send bearer token")
+		}
+		switch r.URL.Path {
+		case "/v1/auth/telegram/start":
+			if r.Method != http.MethodPost || r.ContentLength > 0 {
+				t.Error("bad start request")
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"attempt_id":"attempt","poll_secret":"secret","authorization_url":"https://oauth.telegram.org/auth?state=abc"}`))
+		case "/v1/auth/telegram/poll":
+			polls++
+			var input map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+			}
+			if input["attempt_id"] != "attempt" || input["poll_secret"] != "secret" {
+				t.Errorf("bad poll: %v", input)
+			}
+			if polls == 1 {
+				if len(input) != 2 {
+					t.Errorf("initial poll contains profile: %v", input)
+				}
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"status":"pending"}`))
+			} else if polls == 2 {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"error":{"code":"profile_required"}}`))
+			} else {
+				if input["username"] != "Ari" || input["time_zone"] != "UTC" {
+					t.Errorf("bad profile: %v", input)
+				}
+				_, _ = w.Write([]byte(`{"status":"signed_in","token":"issued"}`))
+			}
+		case "/v1/auth/telegram/restore":
+			var input map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+			}
+			if len(input) != 1 || input["recovery_ticket"] != "ticket" {
+				t.Errorf("bad restore: %v", input)
+			}
+			_, _ = w.Write([]byte(`{"token":"restored"}`))
+		default:
+			t.Errorf("unexpected Telegram path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	c, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := c.StartTelegram(context.Background())
+	if err != nil || start.PollSecret != "secret" || start.AttemptID != "attempt" {
+		t.Fatalf("start: %+v %v", start, err)
+	}
+	result, err := c.PollTelegram(context.Background(), start.AttemptID, start.PollSecret, "", "")
+	if err != nil || result.Status != "pending" {
+		t.Fatalf("pending: %+v %v", result, err)
+	}
+	_, err = c.PollTelegram(context.Background(), start.AttemptID, start.PollSecret, "", "")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "profile_required" {
+		t.Fatalf("profile required: %v", err)
+	}
+	result, err = c.PollTelegram(context.Background(), start.AttemptID, start.PollSecret, "Ari", "UTC")
+	if err != nil || result.Status != "signed_in" || result.Token != "issued" {
+		t.Fatalf("signed in: %+v %v", result, err)
+	}
+	token, err := c.RestoreTelegram(context.Background(), "ticket")
+	if err != nil || token != "restored" {
+		t.Fatalf("restore: %q %v", token, err)
+	}
+}

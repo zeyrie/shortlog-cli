@@ -13,38 +13,45 @@ import (
 )
 
 type fakeAPI struct {
-	account        api.Account
-	accountErr     error
-	profileErr     error
-	profileCalls   int
-	deletionErr    error
-	deletionCalls  int
-	sessionList    []api.Session
-	sessionErr     error
-	actionErr      error
-	logoutCalls    int
-	revokeCalls    []string
-	revokeAllCalls int
-	starts         int
-	verifies       int
-	restores       int
-	name           string
-	zone           string
-	meErr          error
-	inboxErr       error
-	notes          []api.Note
-	next           *string
-	pages          map[string]api.NotesPage
-	pageErr        error
-	requested      []string
-	createErr      error
-	created        []string
-	updateErr      error
-	updated        []string
-	deleteErr      error
-	deleted        []string
-	moveErr        error
-	moved          []string
+	telegramStart        api.TelegramStart
+	telegramStartErr     error
+	telegramPoll         []api.VerifyResult
+	telegramPollErr      error
+	telegramPollCalls    []string
+	telegramRestoreErr   error
+	telegramRestoreCalls int
+	account              api.Account
+	accountErr           error
+	profileErr           error
+	profileCalls         int
+	deletionErr          error
+	deletionCalls        int
+	sessionList          []api.Session
+	sessionErr           error
+	actionErr            error
+	logoutCalls          int
+	revokeCalls          []string
+	revokeAllCalls       int
+	starts               int
+	verifies             int
+	restores             int
+	name                 string
+	zone                 string
+	meErr                error
+	inboxErr             error
+	notes                []api.Note
+	next                 *string
+	pages                map[string]api.NotesPage
+	pageErr              error
+	requested            []string
+	createErr            error
+	created              []string
+	updateErr            error
+	updated              []string
+	deleteErr            error
+	deleted              []string
+	moveErr              error
+	moved                []string
 
 	projectList      []api.Project
 	archivedList     []api.Project
@@ -61,6 +68,29 @@ type fakeAPI struct {
 	projectPageErr   error
 	projectRequested []string
 	projectCreated   []string
+}
+
+func (f *fakeAPI) StartTelegram(_ context.Context) (api.TelegramStart, error) {
+	return f.telegramStart, f.telegramStartErr
+}
+func (f *fakeAPI) PollTelegram(_ context.Context, id, secret, name, zone string) (api.VerifyResult, error) {
+	f.telegramPollCalls = append(f.telegramPollCalls, id+":"+secret+":"+name+":"+zone)
+	if f.telegramPollErr != nil {
+		return api.VerifyResult{}, f.telegramPollErr
+	}
+	if len(f.telegramPoll) == 0 {
+		return api.VerifyResult{Status: "pending"}, nil
+	}
+	result := f.telegramPoll[0]
+	f.telegramPoll = f.telegramPoll[1:]
+	return result, nil
+}
+func (f *fakeAPI) RestoreTelegram(_ context.Context, _ string) (string, error) {
+	f.telegramRestoreCalls++
+	if f.telegramRestoreErr != nil {
+		return "", f.telegramRestoreErr
+	}
+	return "telegram-token", nil
 }
 
 func (f *fakeAPI) UpdateProfile(_ context.Context, _, name, zone string) (api.Account, error) {
@@ -1326,6 +1356,155 @@ func TestAccountLoadFailureAndProfileSaveFailure(t *testing.T) {
 	m = next.(Model)
 	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Changed" || m.username == "Changed" || !strings.Contains(m.View(), "not confirmed") {
 		t.Fatal("profile failure lost draft")
+	}
+}
+
+func TestTelegramSignInAndNewProfile(t *testing.T) {
+	start := api.TelegramStart{AttemptID: "attempt", PollSecret: "private-secret", AuthorizationURL: "https://oauth.telegram.org/auth?state=abc"}
+	f := &fakeAPI{telegramStart: start, telegramPoll: []api.VerifyResult{{Status: "pending"}, {Status: "signed_in", Token: "telegram-token"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy = emailStage, false
+	m.openBrowser = func(string) error { return errors.New("no browser") }
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	if cmd == nil || !m.busy {
+		t.Fatal("Telegram start not dispatched")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != telegramStage || strings.Contains(m.View(), "private-secret") {
+		t.Fatal("attempt not started securely")
+	}
+	next, _ = m.Update(telegramBrowserResult{attempt: "attempt", err: errors.New("no browser")})
+	m = next.(Model)
+	if !strings.Contains(m.View(), start.AuthorizationURL) {
+		t.Fatal("no manual browser fallback")
+	}
+	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(poll())
+	m = next.(Model)
+	if m.stage != telegramStage || m.busy || strings.Contains(m.View(), "private-secret") {
+		t.Fatal("pending result failed")
+	}
+	f.telegramPollErr = &api.Error{Status: 422, Code: "profile_required"}
+	m, poll = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(poll())
+	m = next.(Model)
+	if m.stage != profileStage || !m.telegramLogin {
+		t.Fatal("new account profile not prompted")
+	}
+	f.telegramPollErr = nil
+	m.inputs[usernameInput].SetValue("New User")
+	m.inputs[zoneInput].SetValue("UTC")
+	m, poll = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(poll())
+	m = next.(Model)
+	if m.stage != inboxStage || m.token != "telegram-token" || m.telegramSecret != "" || len(f.telegramPollCalls) != 3 || !strings.Contains(f.telegramPollCalls[2], "New User:UTC") {
+		t.Fatal("Telegram profile completion failed")
+	}
+}
+
+func TestTelegramRestoreRequiresConsent(t *testing.T) {
+	start := api.TelegramStart{AttemptID: "attempt", PollSecret: "private-secret", AuthorizationURL: "https://oauth.telegram.org/auth"}
+	f := &fakeAPI{telegramStart: start, telegramPoll: []api.VerifyResult{{Status: "restore_required", RecoveryTicket: "private-ticket"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy = emailStage, false
+	m.openBrowser = func(string) error { return nil }
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(poll())
+	m = next.(Model)
+	if m.stage != restoreStage || strings.Contains(m.View(), "private-ticket") || f.telegramRestoreCalls != 0 {
+		t.Fatal("restore consent was skipped or secret leaked")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if f.telegramRestoreCalls != 1 || m.stage != inboxStage || m.token != "telegram-token" {
+		t.Fatal("Telegram restore failed")
+	}
+}
+
+func TestTelegramCancelAndUnsafeURL(t *testing.T) {
+	f := &fakeAPI{telegramStart: api.TelegramStart{AttemptID: "attempt", PollSecret: "private", AuthorizationURL: "javascript:alert(1)"}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy = emailStage, false
+	m.openBrowser = func(string) error { t.Fatal("unsafe browser URL opened"); return nil }
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || !strings.Contains(m.View(), "unsafe") || m.telegramSecret != "" {
+		t.Fatal("unsafe URL accepted")
+	}
+	f.telegramStart.AuthorizationURL = "https://oauth.telegram.org/auth"
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !m.busy {
+		t.Fatal("poll not running")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != emailStage || m.busy || m.telegramSecret != "" {
+		t.Fatal("could not cancel in-flight poll")
+	}
+	next, _ = m.Update(poll())
+	m = next.(Model)
+	if m.stage != emailStage || m.token != "" {
+		t.Fatal("late poll result signed in after cancellation")
+	}
+}
+
+func TestTelegramAutomaticPollAndStaleTick(t *testing.T) {
+	f := &fakeAPI{telegramStart: api.TelegramStart{AttemptID: "attempt", PollSecret: "secret", AuthorizationURL: "https://oauth.telegram.org/auth"}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy = emailStage, false
+	m.openBrowser = func(string) error { return nil }
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	tick := telegramTick{attempt: m.telegramAttempt, generation: m.telegramGeneration}
+	next, poll := m.Update(tick)
+	m = next.(Model)
+	if !m.busy || poll == nil {
+		t.Fatal("automatic poll did not start")
+	}
+	next, timer := m.Update(poll())
+	m = next.(Model)
+	if m.busy || timer == nil || len(f.telegramPollCalls) != 1 {
+		t.Fatal("pending poll did not schedule another check")
+	}
+	next, stale := m.Update(tick)
+	m = next.(Model)
+	if stale != nil || len(f.telegramPollCalls) != 1 {
+		t.Fatal("stale tick caused duplicate poll")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	next, ignored := m.Update(telegramTick{attempt: "attempt", generation: m.telegramGeneration})
+	m = next.(Model)
+	if ignored != nil || m.stage != emailStage {
+		t.Fatal("cancelled attempt kept polling")
+	}
+}
+
+func TestTelegramRestoreDeclineAndStartFailure(t *testing.T) {
+	f := &fakeAPI{telegramStartErr: &api.Error{Status: 503, Code: "service_unavailable"}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy = emailStage, false
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || m.busy || !strings.Contains(m.View(), "unavailable") {
+		t.Fatal("unconfigured Telegram server failure not shown")
+	}
+	m.telegramLogin = true
+	m.telegramAttempt = "attempt"
+	m.ticket = "private-ticket"
+	m.stage = restoreStage
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != emailStage || f.telegramRestoreCalls != 0 || m.ticket != "" || m.telegramAttempt != "" {
+		t.Fatal("declining restore did not clear secrets")
 	}
 }
 

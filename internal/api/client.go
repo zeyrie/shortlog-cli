@@ -80,7 +80,9 @@ func (c *Client) get(ctx context.Context, path, token string, output any) error 
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "shortlog-cli")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -304,7 +306,9 @@ func (c *Client) writeNote(ctx context.Context, method, path, token string, inpu
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "shortlog-cli")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -346,6 +350,81 @@ type VerifyResult struct {
 	Status         string `json:"status"`
 	Token          string `json:"token"`
 	RecoveryTicket string `json:"recovery_ticket"`
+}
+
+type TelegramStart struct {
+	AttemptID        string `json:"attempt_id"`
+	PollSecret       string `json:"poll_secret"`
+	AuthorizationURL string `json:"authorization_url"`
+}
+
+func (c *Client) StartTelegram(ctx context.Context) (TelegramStart, error) {
+	var result TelegramStart
+	err := c.writeNote(ctx, http.MethodPost, "/v1/auth/telegram/start", "", nil, &result, http.StatusCreated)
+	if err == nil && (result.AttemptID == "" || result.PollSecret == "" || result.AuthorizationURL == "") {
+		err = errors.New("invalid API response: incomplete Telegram attempt")
+	}
+	return result, err
+}
+
+func (c *Client) PollTelegram(ctx context.Context, attemptID, pollSecret, username, timeZone string) (VerifyResult, error) {
+	input := map[string]string{"attempt_id": attemptID, "poll_secret": pollSecret}
+	if username != "" || timeZone != "" {
+		input["username"], input["time_zone"] = username, timeZone
+	}
+	var result VerifyResult
+	// Pending polls return 202; completed polls return 200. Both carry JSON.
+	err := c.writeTelegramPoll(ctx, input, &result)
+	if err == nil && !((result.Status == "pending") || (result.Status == "signed_in" && result.Token != "") || (result.Status == "restore_required" && result.RecoveryTicket != "")) {
+		err = errors.New("invalid API response: unexpected Telegram poll result")
+	}
+	return result, err
+}
+
+func (c *Client) writeTelegramPoll(ctx context.Context, input any, output *VerifyResult) error {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/auth/telegram/poll", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "shortlog-cli")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		var envelope struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&envelope)
+		return &Error{Status: resp.StatusCode, Code: envelope.Error.Code}
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(output); err != nil {
+		return fmt.Errorf("invalid API response: %w", err)
+	}
+	if (resp.StatusCode == http.StatusAccepted) != (output.Status == "pending") {
+		return errors.New("invalid API response: Telegram poll status mismatch")
+	}
+	return nil
+}
+
+func (c *Client) RestoreTelegram(ctx context.Context, ticket string) (string, error) {
+	var result struct {
+		Token string `json:"token"`
+	}
+	err := c.post(ctx, "/v1/auth/telegram/restore", map[string]string{"recovery_ticket": ticket}, &result, http.StatusOK)
+	if err == nil && result.Token == "" {
+		err = errors.New("invalid API response: missing token")
+	}
+	return result.Token, err
 }
 
 func (c *Client) VerifyEmail(ctx context.Context, challengeID, code, username, timeZone string) (VerifyResult, error) {
