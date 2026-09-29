@@ -11,12 +11,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"shortlog-cli/internal/api"
@@ -62,11 +60,7 @@ type stage int
 
 const (
 	startupStage stage = iota
-	loginStage
-	emailStage
-	codeStage
-	profileStage
-	restoreStage
+	loginStage         // the sign-in screen; its steps belong to loginModel
 	inboxStage
 	readingStage
 	captureStage
@@ -82,7 +76,6 @@ const (
 	accountEditStage
 	accountDiscardStage
 	accountDeleteStage
-	telegramStage
 )
 
 type sessionAction int
@@ -106,69 +99,55 @@ type noteList struct {
 }
 
 type Model struct {
-	api                   emailAPI
-	store                 sessionStore
-	stage                 stage
-	inputs                [4]textinput.Model
-	focus                 int
-	status                statusBar
-	help                  help.Model
-	origin                string // API origin, shown in the status line
-	loginForm             *huh.Form
-	loginValues           *loginFormValues
-	challenge             string
-	ticket                string
-	telegramLogin         bool
-	telegramBrowserFailed bool
-	telegramAttempt       string
-	telegramSecret        string
-	telegramURL           string
-	telegramExpires       time.Time
-	telegramGeneration    uint64
-	telegramBack          stage
-	openBrowser           func(string) error
-	token                 string // Never rendered or logged.
-	email                 string
-	username              string
-	account               api.Account
-	accountBack           stage
-	accountStartName      string
-	accountStartZone      string
-	notes                 []api.Note
-	inboxList             noteList
-	activeProject         *api.Project
-	inboxStashed          bool
-	inboxNeedsRefresh     bool
-	projects              []api.Project
-	projectSelected       int
-	showArchived          bool
-	archiveID             string
-	sessions              []api.Session
-	sessionSelected       int
-	sessionBack           stage
-	sessionAction         sessionAction
-	sessionID             string
-	nextCursor            string
-	selected              int
-	loginOptions          list.Model
-	reader                viewport.Model
-	draft                 textarea.Model
-	editorID              string
-	editorStart           string
-	editorBack            stage
-	deleteID              string
-	deleteBack            stage
-	moveID                string
-	moveBack              stage
-	moveTargets           []moveTarget
-	moveSelected          int
-	quitAfterDiscard      bool
-	resumeDraft           bool
-	selectID              string
-	busy                  bool
-	message               string
-	width                 int
-	height                int
+	api               emailAPI
+	store             sessionStore
+	stage             stage
+	inputs            [4]textinput.Model
+	focus             int
+	status            statusBar
+	help              help.Model
+	origin            string // API origin, shown in the status line
+	login             loginModel
+	token             string // Never rendered or logged.
+	username          string
+	account           api.Account
+	accountBack       stage
+	accountStartName  string
+	accountStartZone  string
+	notes             []api.Note
+	inboxList         noteList
+	activeProject     *api.Project
+	inboxStashed      bool
+	inboxNeedsRefresh bool
+	projects          []api.Project
+	projectSelected   int
+	showArchived      bool
+	archiveID         string
+	sessions          []api.Session
+	sessionSelected   int
+	sessionBack       stage
+	sessionAction     sessionAction
+	sessionID         string
+	nextCursor        string
+	selected          int
+	reader            viewport.Model
+	draft             textarea.Model
+	editorID          string
+	editorStart       string
+	editorBack        stage
+	deleteID          string
+	deleteBack        stage
+	moveID            string
+	moveBack          stage
+	moveTargets       []moveTarget
+	moveSelected      int
+	quitAfterDiscard  bool
+	resumeDraft       bool
+	selectID          string
+	busy              bool
+	message           string
+	width             int
+	height            int
 }
 
 const (
@@ -179,13 +158,13 @@ const (
 )
 
 func New(client emailAPI, store sessionStore) Model {
-	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14), openBrowser: openTelegramBrowser}
-	m.loginValues = &loginFormValues{}
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14)}
 	m.help = newHelp()
+	m.login = newLogin(client, openTelegramBrowser)
+	m.login.setSize(m.width, m.bodyHeight())
 	if origin, ok := client.(interface{ Origin() string }); ok {
 		m.origin = origin.Origin()
 	}
-	m.loginOptions = newLoginOptions()
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
 	m.draft.CharLimit = 20000
@@ -208,10 +187,6 @@ func New(client emailAPI, store sessionStore) Model {
 	m.inputs[accountZoneInput].CharLimit = 64
 	m.inputs[deletePhraseInput].Placeholder = "Type DELETE"
 	m.inputs[deletePhraseInput].CharLimit = 6
-	zone := time.Now().Location().String()
-	if zone != "Local" {
-		m.loginValues.zone = zone
-	}
 	m.focusInput(projectNameInput)
 	return m
 }
@@ -376,8 +351,7 @@ func (m *Model) finishSession() {
 	m.inboxStashed = false
 	m.inboxNeedsRefresh = false
 	m.showArchived = false
-	m.stage = loginStage
-	m.inputs[m.focus].Blur()
+	m.openLogin()
 	m.message = "Signed out."
 	if err != nil {
 		m.message = "Signed out on the server, but the saved credential could not be removed. Remove it from your credential store before restarting."
@@ -439,27 +413,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.resizeLoginOptions()
+		m.login.setSize(m.width, m.bodyHeight())
 		m.resizeReader()
 		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
-		if m.loginForm != nil {
-			m.resizeLoginForm()
-			return m.updateLoginForm(msg)
+		if m.stage == loginStage {
+			return m.updateLogin(msg)
 		}
 		return m, nil
 	case statusBeat:
 		return m, m.status.beat(m.busy, time.Now())
 	case loadedSession:
 		return m.onLoadedSession(msg)
-	case telegramStartResult:
-		return m.onTelegramStart(msg)
-	case telegramBrowserResult:
-		return m.onTelegramBrowser(msg)
-	case telegramTick:
-		return m.onTelegramTick(msg)
-	case telegramPollResult:
-		return m.onTelegramPoll(msg)
+	case telegramStartResult, telegramBrowserResult, telegramTick, telegramPollResult, startResult, verifyResult, restoreResult:
+		return m.updateLogin(msg)
 	case accountResult:
 		m.busy = false
 		if msg.err != nil {
@@ -582,8 +549,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.store.Delete()
 				m.token = ""
 				m.activeProject = nil
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -623,8 +589,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -653,8 +618,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -677,8 +641,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -724,8 +687,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -764,8 +726,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.store.Delete()
 				m.token = ""
 				m.resumeDraft = true
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again to resume your draft."
 				return m, nil
 			}
@@ -793,8 +754,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.token = ""
 				m.resumeDraft = true
 				m.editorBack = inboxStage
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again to resume your unsaved edits."
 				return m, nil
 			}
@@ -831,8 +791,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -857,8 +816,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = loginStage
-				m.inputs[m.focus].Blur()
+				m.openLogin()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -890,12 +848,6 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.message = "Note moved to " + safeText(msg.destination.name) + "."
 		return m, nil
-	case startResult:
-		return m.onEmailStart(msg)
-	case verifyResult:
-		return m.onEmailVerify(msg)
-	case restoreResult:
-		return m.onRestore(msg)
 	case tea.KeyMsg:
 		m.status.dismiss()
 		if msg.String() == "ctrl+c" {
@@ -907,8 +859,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		if isLoginStage(m.stage) {
-			return m.updateLoginKey(msg)
+		if m.stage == loginStage {
+			return m.updateLogin(msg)
 		}
 		if m.busy {
 			return m, nil
@@ -939,7 +891,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = ""
 				return m, nil
 			case startupStage:
-				m.stage = loginStage
+				m.openLogin()
 				m.token = ""
 			case readingStage:
 				m.stage = inboxStage
@@ -1458,10 +1410,81 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputs[m.focus], cmd = m.inputs[m.focus].Update(message)
 		return m, cmd
 	}
-	if !m.busy && (m.stage == emailStage || m.stage == codeStage || m.stage == profileStage) {
-		return m.updateLoginForm(message)
+	if m.stage == loginStage {
+		return m.updateLogin(message)
 	}
 	return m, nil
+}
+
+// openLogin shows the sign-in screen from its first step, with no attempt in
+// progress. Callers set m.message to leave a notice there, such as why the
+// session ended.
+func (m *Model) openLogin() {
+	m.stage = loginStage
+	m.busy = false
+	m.inputs[m.focus].Blur()
+	m.login = m.login.reset()
+	m.login.setSize(m.width, m.bodyHeight())
+}
+
+// updateLogin runs the sign-in screen and applies what it reports: a status
+// change, and on success the session token, which leaves the screen.
+func (m Model) updateLogin(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.login, cmd = m.login.Update(msg)
+	if m.stage != loginStage {
+		// A late result for a finished attempt; the screen ignores it, and
+		// nothing it reports concerns the screen now shown.
+		m.login.note, m.login.token = nil, ""
+		return m, nil
+	}
+	m.busy = m.login.busy
+	if note := m.login.note; note != nil {
+		m.login.note = nil
+		if note.text == "" {
+			m.clearStatus()
+		} else {
+			m.setStatus(note.level, note.text)
+		}
+	}
+	if token := m.login.token; token != "" {
+		m.login = m.login.reset()
+		return m, m.signedIn(token)
+	}
+	return m, cmd
+}
+
+func (m Model) onLoadedSession(msg loadedSession) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.openLogin()
+		m.setStatus(statusWarn, "Credential store unavailable; this session may not be saved.")
+		return m, nil
+	}
+	if msg.token == "" {
+		m.openLogin()
+		return m, nil
+	}
+	m.token = msg.token
+	m.message = "Checking saved session…"
+	return m, m.loadInbox(msg.token, false)
+}
+
+// signedIn starts a fresh session: it clears what a previous one left behind
+// and loads the Inbox.
+func (m *Model) signedIn(token string) tea.Cmd {
+	m.token = token
+	m.activeProject = nil
+	m.projects = nil
+	m.projectSelected = 0
+	m.showArchived = false
+	m.inboxList = noteList{}
+	m.inboxStashed = false
+	m.inboxNeedsRefresh = false
+	m.stage = inboxStage
+	m.busy = true
+	m.status.clear()
+	m.message = "Loading Inbox…"
+	return m.loadInbox(token, true)
 }
 
 // setStatus shows a message on the status line and drops any body message, so
@@ -1487,7 +1510,7 @@ func (m Model) footerHeight() int {
 
 // cardLoading reports whether a sign-in card is showing its own loader.
 func (m Model) cardLoading() bool {
-	return m.busy && m.loginForm != nil && (m.stage == emailStage || m.stage == codeStage || m.stage == profileStage)
+	return m.stage == loginStage && m.login.cardLoading()
 }
 
 func (m Model) bodyHeight() int { return max(1, m.height-m.footerHeight()) }
@@ -1496,9 +1519,13 @@ func (m Model) bodyHeight() int { return max(1, m.height-m.footerHeight()) }
 func (m Model) footer() string {
 	status := m.status.view(m.width, m.busy, m.statusContext())
 	if m.cardLoading() {
-		// The card already shows the spinner and what is happening; keep the
-		// footer to its context rather than saying it twice.
-		status = statusBar{}.view(m.width, false, m.statusContext())
+		// The card already shows the spinner and what is happening, so drop
+		// the footer's spinner and progress text. Problems still show here.
+		quiet := m.status
+		if quiet.current.level == statusInfo {
+			quiet.clear()
+		}
+		status = quiet.view(m.width, false, m.statusContext())
 	}
 	if m.footerHeight() == 1 {
 		return status
@@ -1713,10 +1740,7 @@ var (
 
 func (m Model) View() string {
 	if m.stage == loginStage {
-		return m.loginView() + "\n" + m.footer()
-	}
-	if isLoginStage(m.stage) {
-		return m.loginStepView() + "\n" + m.footer()
+		return m.login.View(m.message, m.status.spinner()) + "\n" + m.footer()
 	}
 	var body string
 	switch m.stage {

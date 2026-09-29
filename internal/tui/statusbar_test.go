@@ -61,20 +61,17 @@ func TestStatusHistoryIsBounded(t *testing.T) {
 	}
 }
 
-func TestStatusBeatAdvancesSpinnerOnlyWhileBusy(t *testing.T) {
+func TestStatusBeatKeepsTheClockRunning(t *testing.T) {
 	var s statusBar
-	if s.beat(true, time.Now()) == nil || s.frame != 1 {
-		t.Fatal("busy beat did not advance the spinner")
-	}
-	if s.beat(false, time.Now()) == nil || s.frame != 1 {
-		t.Fatal("idle beat stopped the clock or advanced the spinner")
+	if s.beat(true, time.Now()) == nil || s.beat(false, time.Now()) == nil || s.frame != 2 {
+		t.Fatalf("beat stopped or skipped a frame: frame %d", s.frame)
 	}
 }
 
 func TestFooterDefersToCardLoader(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
 	m.stage, m.busy, m.origin = loginStage, false, "http://127.0.0.1:8080"
-	m.showLoginForm(emailStage)
+	m.login.showForm(emailStep)
 	m = typeText(m, "a@example.com")
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	footer := stripStatusANSI.ReplaceAllString(m.footer(), "")
@@ -113,7 +110,7 @@ func TestStatusLineFitsAndContextYields(t *testing.T) {
 }
 
 func TestFooterFitsEveryScreen(t *testing.T) {
-	for s := startupStage; s <= telegramStage; s++ {
+	for s := startupStage; s <= accountDeleteStage; s++ {
 		for _, size := range []struct{ width, height int }{{80, 24}, {42, 16}, {20, 10}, {20, 6}} {
 			m := New(&fakeAPI{}, &fakeStore{})
 			m.stage, m.busy = s, false

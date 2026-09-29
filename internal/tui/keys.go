@@ -33,6 +33,54 @@ var (
 	keyTabSwitch  = bind("tab", "switch field", "tab", "shift+tab")
 )
 
+// loginKeyMap is the sign-in screen's bindings. Update matches keys with
+// these, and ShortHelp picks the ones that apply to the current step.
+type loginKeyMap struct {
+	ChooseEmail, ChooseTelegram, Continue, Select, Quit key.Binding
+	Next, PrevField, UseTelegram, Back                  key.Binding
+	Check, Reopen, Cancel                               key.Binding
+	Restore, Decline                                    key.Binding
+}
+
+func defaultLoginKeys() loginKeyMap {
+	return loginKeyMap{
+		ChooseEmail:    bind("1", "email", "1"),
+		ChooseTelegram: bind("2", "telegram", "2"),
+		Continue:       bind("enter", "continue", "enter"),
+		Select:         keySelect,
+		Quit:           keyQuit,
+		Next:           bind("enter", "next", "enter", "tab"),
+		PrevField:      bind("shift+tab", "previous field", "shift+tab"),
+		UseTelegram:    bind("ctrl+t", "telegram", "ctrl+t"),
+		Back:           keyBack,
+		Check:          bind("r", "check now", "r"),
+		Reopen:         bind("o", "reopen browser", "o"),
+		Cancel:         keyCancel,
+		Restore:        bind("y", "restore", "y", "Y"),
+		Decline:        bind("n", "cancel", "n", "N"),
+	}
+}
+
+// ShortHelp lists the footer hints for the current step, most important first.
+func (l loginModel) ShortHelp() []key.Binding {
+	k := l.keys
+	switch l.step {
+	case menuStep:
+		return []key.Binding{k.Continue, bind("1/2", "choose", "1", "2"), k.Select, k.Quit}
+	case emailStep:
+		return []key.Binding{bind("enter", "send code", "enter"), k.UseTelegram, bind("esc", "sign-in options", "esc"), keyForceQuit}
+	case codeStep:
+		return []key.Binding{bind("enter", "verify", "enter"), bind("esc", "change email", "esc"), keyForceQuit}
+	case profileStep:
+		return []key.Binding{bind("enter", "next/save", "enter"), keyTabSwitch, k.Back}
+	case telegramStep:
+		return []key.Binding{k.Check, k.Reopen, k.Cancel}
+	case restoreStep:
+		return []key.Binding{k.Restore, bind("n", "keep deletion", "n"), bind("esc", "sign-in options", "esc")}
+	}
+	return nil
+}
+
 func newHelp() help.Model {
 	h := help.New()
 	h.Styles.ShortKey = helpKeyStyle
@@ -49,17 +97,7 @@ func (m Model) shortcuts() []key.Binding {
 	case startupStage:
 		return []key.Binding{keyForceQuit}
 	case loginStage:
-		return []key.Binding{bind("enter", "continue", "enter"), bind("1/2", "choose", "1", "2"), keySelect, keyQuit}
-	case emailStage:
-		return []key.Binding{bind("enter", "send code", "enter"), bind("ctrl+t", "telegram", "ctrl+t"), bind("esc", "sign-in options", "esc"), keyForceQuit}
-	case codeStage:
-		return []key.Binding{bind("enter", "verify", "enter"), bind("esc", "change email", "esc"), keyForceQuit}
-	case profileStage:
-		return []key.Binding{bind("enter", "next/save", "enter"), keyTabSwitch, keyBack}
-	case telegramStage:
-		return []key.Binding{bind("r", "check now", "r"), bind("o", "reopen browser", "o"), keyCancel}
-	case restoreStage:
-		return []key.Binding{bind("y", "restore", "y"), noKey("cancel")}
+		return m.login.ShortHelp()
 	case inboxStage:
 		if m.archivedProject() {
 			return []key.Binding{bind("enter", "read", "enter"), keySelect, keyOlder, keyRefresh, keyProjects, keySessions, keyAccount, keyBack, keyQuit}

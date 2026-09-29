@@ -20,15 +20,15 @@ func TestLoginMenuSelectionAndNavigation(t *testing.T) {
 		t.Fatal("empty credential did not open login menu")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	if m.loginOptions.Index() != 1 {
+	if m.login.options.Index() != 1 {
 		t.Fatal("arrow did not select Telegram")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if m.loginOptions.Index() != 0 {
+	if m.login.options.Index() != 0 {
 		t.Fatal("k did not move selection up")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if m.loginOptions.Index() != 1 {
+	if m.login.options.Index() != 1 {
 		t.Fatal("j did not move selection down")
 	}
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -37,20 +37,20 @@ func TestLoginMenuSelectionAndNavigation(t *testing.T) {
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != loginStage || !strings.Contains(m.View(), "Could not start Telegram") {
+	if m.login.step != menuStep || !strings.Contains(m.View(), "Could not start Telegram") {
 		t.Fatal("failed start did not return to menu")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.stage != emailStage || m.loginForm == nil {
+	if m.login.step != emailStep || m.login.form == nil {
 		t.Fatal("Enter did not open the email form")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.stage != loginStage {
+	if m.login.step != menuStep {
 		t.Fatal("Esc did not return to login options")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-	if m.stage != emailStage || m.loginOptions.Index() != 0 {
+	if m.login.step != emailStep || m.login.options.Index() != 0 {
 		t.Fatal("1 did not open email directly")
 	}
 }
@@ -59,18 +59,18 @@ func TestLoginDirectTelegramAndCancel(t *testing.T) {
 	f := &fakeAPI{telegramStart: api.TelegramStart{AttemptID: "attempt", PollSecret: "private", AuthorizationURL: "https://oauth.telegram.org/auth"}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy = loginStage, false
-	m.openBrowser = func(string) error { return nil }
+	m.login.openBrowser = func(string) error { return nil }
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
-	if cmd == nil || m.loginOptions.Index() != 1 || !m.busy {
+	if cmd == nil || m.login.options.Index() != 1 || !m.busy {
 		t.Fatal("2 did not start Telegram directly")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != telegramStage {
+	if m.login.step != telegramStep {
 		t.Fatal("Telegram approval not opened")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.stage != loginStage || m.telegramSecret != "" || m.loginOptions.Index() != 1 {
+	if m.login.step != menuStep || m.login.telegramSecret != "" || m.login.options.Index() != 1 {
 		t.Fatal("Telegram cancel did not return to menu")
 	}
 }
@@ -92,7 +92,7 @@ func TestLoginLogoResponsiveAndCentered(t *testing.T) {
 		{28, 14, "SHORTLOG"},
 	} {
 		m.width, m.height = size.width, size.height
-		m.resizeLoginOptions()
+		m.login.setSize(m.width, m.bodyHeight())
 		view := stripANSI.ReplaceAllString(m.View(), "")
 		for _, row := range strings.Split(size.logo, "\n") {
 			if !strings.Contains(view, strings.TrimRight(row, " ")) {
@@ -109,16 +109,17 @@ func TestLoginLogoResponsiveAndCentered(t *testing.T) {
 			}
 		}
 	}
-	m.width, m.height = 80, 24
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = sized.(Model)
 	view := stripANSI.ReplaceAllString(m.View(), "")
 	first := strings.Index(view, strings.Split(large, "\n")[0])
 	if first < 0 || strings.Count(view[:first], "\n") < 2 {
 		t.Fatal("logo is not vertically centered")
 	}
-	m.loginOptions.Select(1)
+	m.login.options.Select(1)
 	resized, _ := m.Update(tea.WindowSizeMsg{Width: 42, Height: 16})
 	m = resized.(Model)
-	if m.loginOptions.Index() != 1 {
+	if m.login.options.Index() != 1 {
 		t.Fatal("resizing reset the selected provider")
 	}
 }
@@ -129,7 +130,7 @@ func TestLoginSmallTerminalWithStatus(t *testing.T) {
 		m.stage, m.busy = loginStage, false
 		m.width, m.height = size.width, size.height
 		m.message = "Telegram sign-in unavailable. Configure Telegram on the server or use email."
-		m.resizeLoginOptions()
+		m.login.setSize(m.width, m.bodyHeight())
 		view := m.View()
 		if lipgloss.Height(view) != m.height {
 			t.Errorf("%dx%d: login screen exceeds terminal height: %d", m.width, m.height, lipgloss.Height(view))
@@ -149,9 +150,9 @@ func TestLoginOptionsAlignedAtBothSelections(t *testing.T) {
 	for _, width := range []int{80, 42, 30} {
 		m.width = width
 		m.height = 24
-		m.resizeLoginOptions()
+		m.login.setSize(m.width, m.bodyHeight())
 		for selected := 0; selected < 2; selected++ {
-			m.loginOptions.Select(selected)
+			m.login.options.Select(selected)
 			rows := strings.Split(stripANSI.ReplaceAllString(m.View(), ""), "\n")
 			var columns []int
 			emailRow, telegramRow := -1, -1
@@ -166,7 +167,7 @@ func TestLoginOptionsAlignedAtBothSelections(t *testing.T) {
 				}
 			}
 			if len(columns) != 2 || columns[0] != columns[1] || emailRow < 0 || telegramRow <= emailRow {
-				t.Errorf("width %d selection %d: option text columns = %v, rows = %q", width, selected, columns, stripANSI.ReplaceAllString(m.loginOptions.View(), ""))
+				t.Errorf("width %d selection %d: option text columns = %v, rows = %q", width, selected, columns, stripANSI.ReplaceAllString(m.login.options.View(), ""))
 			}
 		}
 	}
@@ -193,7 +194,7 @@ func TestValidateEmail(t *testing.T) {
 func TestFailedEmailRequestKeepsFormEditable(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
 	m.stage, m.busy = loginStage, false
-	m.showLoginForm(emailStage)
+	m.login.showForm(emailStep)
 	m = typeText(m, "a@example.co")
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if !m.busy || !strings.Contains(m.View(), "a@example.co") {
@@ -202,8 +203,8 @@ func TestFailedEmailRequestKeepsFormEditable(t *testing.T) {
 	next, _ := m.Update(startResult{"", errors.New("offline")})
 	m = next.(Model)
 	m = typeText(m, "m")
-	if m.stage != emailStage || m.loginValues.email != "a@example.com" || !strings.Contains(m.View(), "a@example.com") {
-		t.Fatalf("entry not editable after failure: stage %d, value %q", m.stage, m.loginValues.email)
+	if m.login.step != emailStep || m.login.values.email != "a@example.com" || !strings.Contains(m.View(), "a@example.com") {
+		t.Fatalf("entry not editable after failure: stage %d, value %q", m.stage, m.login.values.email)
 	}
 	if m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter}); !m.busy || cmd == nil {
 		t.Fatal("corrected entry was not resubmitted")

@@ -13,12 +13,12 @@ func TestLoginStepsShareCenteredLandingLayout(t *testing.T) {
 	stripANSI := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	landing := New(&fakeAPI{}, &fakeStore{})
 	landing.stage, landing.busy = loginStage, false
-	landing.resizeLoginOptions()
+	landing.login.setSize(landing.width, landing.bodyHeight())
 
 	email := New(&fakeAPI{}, &fakeStore{})
 	email.stage, email.busy = loginStage, false
-	email.resizeLoginOptions()
-	email.showLoginForm(emailStage)
+	email.login.setSize(email.width, email.bodyHeight())
+	email.login.showForm(emailStep)
 
 	if column(landing.View(), "Continue with email") == 0 || column(email.View(), "Email address") == 0 {
 		t.Fatal("expected both screens to render their content")
@@ -103,8 +103,8 @@ func TestLoginStepsFitShortTerminals(t *testing.T) {
 		m := New(&fakeAPI{}, &fakeStore{})
 		m.stage, m.busy = loginStage, false
 		m.width, m.height = size.width, size.height
-		m.resizeLoginOptions()
-		m.showLoginForm(emailStage)
+		m.login.setSize(m.width, m.bodyHeight())
+		m.login.showForm(emailStep)
 		m.message = "Could not send a code. Check your connection and try again."
 		view := m.View()
 		if height := lipgloss.Height(view); height != m.height {
@@ -124,9 +124,9 @@ func TestLoginFormCardIsStable(t *testing.T) {
 		m := New(&fakeAPI{}, &fakeStore{})
 		m.stage, m.busy = loginStage, false
 		m.width, m.height = size.width, size.height
-		m.resizeLoginOptions()
+		m.login.setSize(m.width, m.bodyHeight())
 		logoRow := row(stripANSI.ReplaceAllString(m.View(), ""), "A quiet place")
-		m.showLoginForm(emailStage)
+		m.login.showForm(emailStep)
 		view := stripANSI.ReplaceAllString(m.View(), "")
 		left, right := card(view)
 		if left < 0 {
@@ -218,7 +218,7 @@ func center(view string) int {
 func TestLoginFormResizesWithTerminal(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
 	m.stage, m.busy = loginStage, false
-	m.showLoginForm(emailStage)
+	m.login.showForm(emailStep)
 	resized, _ := m.Update(tea.WindowSizeMsg{Width: 24, Height: 20})
 	m = resized.(Model)
 	for _, line := range strings.Split(m.View(), "\n") {

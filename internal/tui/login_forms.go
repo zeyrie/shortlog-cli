@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -59,13 +60,13 @@ func validateZone(value string) error {
 	return nil
 }
 
-// loginBoxed reports whether the sign-in form sits in a rounded card. The card
-// costs two columns and two rows, so tight terminals fall back to Huh's bar.
-func (m Model) loginBoxed() bool { return m.width >= 28 && m.bodyHeight() >= 12 }
+// boxed reports whether sign-in steps sit in a rounded card. The card costs
+// two columns and two rows, so tight terminals fall back to Huh's left bar.
+func (l loginModel) boxed() bool { return l.width >= 28 && l.height >= 12 }
 
-// loginFieldWidth is the outer width of a sign-in field: fixed, so the field
+// loginFieldWidth is the outer width of a sign-in card: fixed, so a field
 // neither grows nor shifts while the user types, and the same on every step,
-// so the box stays put between steps. Long entries scroll inside it.
+// so the card stays put between steps. Long entries scroll inside it.
 func loginFieldWidth(termWidth int, boxed bool) int {
 	width := min(42, max(12, termWidth-4))
 	if !boxed {
@@ -74,8 +75,8 @@ func loginFieldWidth(termWidth int, boxed bool) int {
 	return width
 }
 
-// loginFormWidth converts the outer field width into Huh's width, which
-// excludes the card's border and padding.
+// loginFormWidth converts the outer card width into the width of what goes
+// inside it, which excludes the card's border and padding.
 func loginFormWidth(termWidth int, boxed bool) int {
 	if boxed {
 		return loginFieldWidth(termWidth, boxed) - 4
@@ -95,7 +96,7 @@ func loginTheme(boxed bool) *huh.Theme {
 	theme.Blurred.Title = dimStyle
 	theme.Blurred.TextInput.Prompt = dimStyle
 	if boxed {
-		// The card is drawn around the whole form by formBlock. Huh sizes its
+		// The card is drawn around the whole form by the view. Huh sizes its
 		// group viewport for unframed fields, so a border on each field would
 		// be clipped; the fields themselves stay plain.
 		theme.Focused.Base = lipgloss.NewStyle()
@@ -106,128 +107,122 @@ func loginTheme(boxed bool) *huh.Theme {
 	return theme
 }
 
-// resizeLoginForm refits the open form after a terminal resize, switching
-// between the boxed and compact styles when the size crosses the threshold.
-func (m *Model) resizeLoginForm() {
-	if m.loginForm != nil {
-		boxed := m.loginBoxed()
-		m.loginForm.WithTheme(loginTheme(boxed)).WithWidth(loginFormWidth(m.width, boxed))
+// resizeForm refits the open form after a resize, switching between the
+// boxed and compact styles when the size crosses the threshold.
+func (l *loginModel) resizeForm() {
+	if l.form != nil {
+		boxed := l.boxed()
+		l.form.WithTheme(loginTheme(boxed)).WithWidth(loginFormWidth(l.width, boxed))
 	}
 }
 
-// showLoginForm rebuilds the Huh form for a sign-in step.
-func (m *Model) showLoginForm(s stage) tea.Cmd {
-	m.stage = s
-	m.inputs[m.focus].Blur()
-	boxed := m.loginBoxed()
+// showForm moves to a form step and builds its Huh form. Fields bind to
+// l.values, so entries survive going back a step or a failed request.
+func (l *loginModel) showForm(step loginStep) tea.Cmd {
+	l.step = step
+	boxed := l.boxed()
 	var fields []huh.Field
-	switch s {
-	case emailStage:
-		fields = []huh.Field{huh.NewInput().Key("email").Title("Email address").Placeholder("you@example.com").CharLimit(320).Value(&m.loginValues.email).Validate(validateEmail)}
-	case codeStage:
-		fields = []huh.Field{huh.NewInput().Key("code").Title("8-digit email code").Placeholder("12345678").CharLimit(8).Value(&m.loginValues.code).Validate(validateCode)}
-	case profileStage:
+	switch step {
+	case emailStep:
+		fields = []huh.Field{huh.NewInput().Key("email").Title("Email address").Placeholder("you@example.com").CharLimit(320).Value(&l.values.email).Validate(validateEmail)}
+	case codeStep:
+		fields = []huh.Field{huh.NewInput().Key("code").Title("8-digit email code").Placeholder("12345678").CharLimit(8).Value(&l.values.code).Validate(validateCode)}
+	case profileStep:
 		fields = []huh.Field{
-			huh.NewInput().Key("name").Title("Name").Placeholder("Your name").CharLimit(80).Value(&m.loginValues.name).Validate(validateName),
-			huh.NewInput().Key("zone").Title("IANA time zone").Placeholder("e.g. Europe/London").CharLimit(64).Value(&m.loginValues.zone).Validate(validateZone),
+			huh.NewInput().Key("name").Title("Name").Placeholder("Your name").CharLimit(80).Value(&l.values.name).Validate(validateName),
+			huh.NewInput().Key("zone").Title("IANA time zone").Placeholder("e.g. Europe/London").CharLimit(64).Value(&l.values.zone).Validate(validateZone),
 		}
 	default:
+		l.form = nil
 		return nil
 	}
-	m.loginForm = huh.NewForm(huh.NewGroup(fields...)).WithTheme(loginTheme(boxed)).WithShowHelp(false).WithWidth(loginFormWidth(m.width, boxed))
-	return m.loginForm.Init()
+	l.form = huh.NewForm(huh.NewGroup(fields...)).WithTheme(loginTheme(boxed)).WithShowHelp(false).WithWidth(loginFormWidth(l.width, boxed))
+	return l.form.Init()
 }
 
-func (m Model) loginFieldKeys() []string {
-	switch m.stage {
-	case emailStage:
+func (l loginModel) fieldKeys() []string {
+	switch l.step {
+	case emailStep:
 		return []string{"email"}
-	case codeStage:
+	case codeStep:
 		return []string{"code"}
-	case profileStage:
+	case profileStep:
 		return []string{"name", "zone"}
 	}
 	return nil
 }
 
-// updateLoginForm forwards messages to the Huh form. Huh validates while the
-// user types; Enter and Tab advance or submit, Shift+Tab returns a field.
-func (m Model) updateLoginForm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.loginForm == nil {
-		return m, nil
+// updateForm forwards messages to the Huh form. Huh validates while the user
+// types; Enter and Tab advance or submit, Shift+Tab returns a field.
+func (l loginModel) updateForm(msg tea.Msg) (loginModel, tea.Cmd) {
+	if l.form == nil {
+		return l, nil
 	}
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "enter", "tab":
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		switch {
+		case key.Matches(msg, l.keys.Next):
 			// Huh answers Enter with its own advance command; drop it and
 			// advance here, so validation and submission stay in one place.
-			form, _ := m.loginForm.Update(msg)
-			m.loginForm = form.(*huh.Form)
-			if m.loginForm.GetFocusedField().Error() != nil {
-				return m, nil // Huh renders the focused field's error.
+			form, _ := l.form.Update(msg)
+			l.form = form.(*huh.Form)
+			if l.form.GetFocusedField().Error() != nil {
+				return l, nil // Huh renders the focused field's error.
 			}
-			if keys := m.loginFieldKeys(); len(keys) > 0 && m.loginForm.GetFocusedField().GetKey() == keys[len(keys)-1] {
-				return m.submitLoginForm()
+			if keys := l.fieldKeys(); len(keys) > 0 && l.form.GetFocusedField().GetKey() == keys[len(keys)-1] {
+				return l.submit()
 			}
-			return m, m.loginForm.NextField() // focus command: starts the cursor blink
-		case "shift+tab":
-			return m, m.loginForm.PrevField()
+			return l, l.form.NextField() // focus command: starts the cursor blink
+		case key.Matches(msg, l.keys.PrevField):
+			return l, l.form.PrevField()
 		}
 	}
-	form, cmd := m.loginForm.Update(msg)
-	m.loginForm = form.(*huh.Form)
-	return m, cmd
+	form, cmd := l.form.Update(msg)
+	l.form = form.(*huh.Form)
+	return l, cmd
 }
 
-// submitLoginForm checks every value of the step and dispatches its request.
-// The Huh form is deliberately never completed: a completed form renders
-// nothing and ignores input, which would blank the card while the request
-// runs and leave the entry uneditable if it fails.
-func (m Model) submitLoginForm() (tea.Model, tea.Cmd) {
+// submit checks every value of the step and dispatches its request. The Huh
+// form is deliberately never completed: a completed form renders nothing and
+// ignores input, which would blank the card while the request runs and leave
+// the entry uneditable if it fails.
+func (l loginModel) submit() (loginModel, tea.Cmd) {
+	if l.busy {
+		return l, nil
+	}
 	var err error
-	switch m.stage {
-	case emailStage:
-		err = validateEmail(m.loginValues.email)
-	case codeStage:
-		err = validateCode(m.loginValues.code)
-	case profileStage:
-		err = errors.Join(validateName(m.loginValues.name), validateZone(m.loginValues.zone))
+	switch l.step {
+	case emailStep:
+		err = validateEmail(l.values.email)
+	case codeStep:
+		err = validateCode(l.values.code)
+	case profileStep:
+		err = errors.Join(validateName(l.values.name), validateZone(l.values.zone))
 	}
 	if err != nil {
 		// Only reachable when an earlier field was edited after leaving it;
 		// Huh shows the focused field's own error inline.
-		m.setStatus(statusError, "Check the form: "+err.Error()+".")
-		return m, nil
+		l.setStatus(statusError, "Check the form: "+err.Error()+".")
+		return l, nil
 	}
-	return m.dispatchLogin()
-}
-
-func (m Model) dispatchLogin() (tea.Model, tea.Cmd) {
-	if m.busy {
-		return m, nil
-	}
-	switch m.stage {
-	case emailStage:
-		m.clearTelegram()
-		address := strings.TrimSpace(m.loginValues.email)
-		m.email, m.busy = address, true
-		m.setStatus(statusInfo, "Sending email code…")
-		return m, func() tea.Msg {
-			id, err := m.api.StartEmail(context.Background(), address)
+	switch l.step {
+	case emailStep:
+		l.clearTelegram()
+		address := strings.TrimSpace(l.values.email)
+		l.email, l.busy = address, true
+		l.setStatus(statusInfo, "Sending email code…")
+		client := l.api
+		return l, func() tea.Msg {
+			id, err := client.StartEmail(context.Background(), address)
 			return startResult{id, err}
 		}
-	case codeStage:
-		cmd := m.verify(m.loginValues.code, "", "")
-		return m, cmd
-	case profileStage:
-		name := strings.TrimSpace(m.loginValues.name)
-		if m.telegramLogin {
-			m.setStatus(statusInfo, "Checking Telegram approval…")
-			cmd := m.pollTelegram(name, m.loginValues.zone)
-			return m, cmd
+	case codeStep:
+		return l, l.verify(l.values.code, "", "")
+	case profileStep:
+		name := strings.TrimSpace(l.values.name)
+		if l.telegramLogin {
+			return l, l.pollTelegram(name, l.values.zone)
 		}
-		cmd := m.verify(m.loginValues.code, name, m.loginValues.zone)
-		return m, cmd
+		return l, l.verify(l.values.code, name, l.values.zone)
 	}
-	return m, nil
+	return l, nil
 }

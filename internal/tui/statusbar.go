@@ -75,15 +75,20 @@ func (s *statusBar) dismiss() {
 	}
 }
 
-// beat advances the spinner while busy and expires stale info when idle, then
-// schedules the next beat.
+// beat advances the spinner, expires stale info when idle, and schedules the
+// next beat. The spinner turns even when nothing is busy, because some views
+// show one while waiting on someone else, such as Telegram approval.
 func (s *statusBar) beat(busy bool, now time.Time) tea.Cmd {
-	if busy {
-		s.frame++
-	} else if s.current.level == statusInfo && s.current.text != "" && now.Sub(s.current.at) >= statusInfoTTL {
+	s.frame++
+	if !busy && s.current.level == statusInfo && s.current.text != "" && now.Sub(s.current.at) >= statusInfoTTL {
 		s.clear()
 	}
 	return statusTick()
+}
+
+// spinner is the current spinner frame, for views that show their own.
+func (s statusBar) spinner() string {
+	return menuRailStyle.Render(spinnerFrames[s.frame%len(spinnerFrames)])
 }
 
 func statusTick() tea.Cmd {

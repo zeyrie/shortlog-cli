@@ -1,110 +1,131 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// loginBody renders the part of a sign-in step below the shared header.
-func (m Model) loginBody() string {
-	switch m.stage {
-	case emailStage:
-		return m.formBlock("Sign in with email")
-	case telegramStage:
-		body := titleStyle.Render("Sign in with Telegram") + "\n\nApprove access in your browser. This attempt expires in about 10 minutes."
-		if m.telegramBrowserFailed {
-			body += "\n\nOpen manually: " + safeText(m.telegramURL)
-		}
-		return body
-	case codeStage:
-		return m.formBlock("Code sent to " + safeText(m.email))
-	case profileStage:
-		return m.formBlock("Finish creating your account")
-	case restoreStage:
-		return "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
+// View renders the sign-in screen into the space above the footer. notice is
+// a message carried over from another screen, such as a deletion deadline,
+// and spinner is the status bar's current spinner frame.
+func (l loginModel) View(notice, spinner string) string {
+	var rows []loginRow
+	switch l.step {
+	case menuStep:
+		rows = []loginRow{{text: l.menu(), center: true}}
+	case emailStep:
+		rows = []loginRow{{text: l.formBlock("Sign in with email", spinner), center: true}}
+	case codeStep:
+		rows = []loginRow{{text: l.formBlock("Code sent to "+safeText(l.email), spinner), center: true}}
+	case profileStep:
+		rows = []loginRow{{text: l.formBlock("Finish creating your account", spinner), center: true}}
+	case telegramStep:
+		rows = []loginRow{{text: l.telegramBlock(spinner), center: true}}
+	case restoreStep:
+		rows = []loginRow{{text: l.restoreBlock(spinner), center: true}}
 	}
-	return ""
+	if notice != "" {
+		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: l.notice(notice), center: true})
+	}
+	return l.screen(rows)
 }
 
-// formBlock stacks a heading over the step's form. The form has a fixed width
-// set by loginFieldWidth, so the heading is centered over the field itself and
-// neither moves while the user types.
-func (m Model) formBlock(heading string) string {
-	if m.loginForm == nil {
+// card frames a step's content. Every step shares its width, so the card
+// keeps its place from one step to the next. The fixed width also wraps
+// anything longer, such as a validation error, instead of widening the card.
+func (l loginModel) card(content string) string {
+	width := loginFieldWidth(l.width, l.boxed())
+	style := lipgloss.NewStyle().Width(width)
+	if l.boxed() {
+		style = style.Width(width-2).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
+	}
+	return style.Render(content)
+}
+
+// titled stacks a heading over a card. Whichever is narrower is centered under
+// the other, so the card stays on the screen's axis even when the heading (a
+// long address) is wider than it.
+func (l loginModel) titled(heading, card string) string {
+	title := titleStyle.Render(ansi.Truncate(heading, max(1, l.width-4), "…"))
+	if lipgloss.Width(title) < lipgloss.Width(card) {
+		title = lipgloss.PlaceHorizontal(lipgloss.Width(card), lipgloss.Center, title)
+	} else {
+		card = lipgloss.PlaceHorizontal(lipgloss.Width(title), lipgloss.Center, card)
+	}
+	return title + "\n" + card
+}
+
+// formBlock shows a form step. While its request runs, a loader row sits under
+// the submitted fields: one row, so the header keeps its place.
+func (l loginModel) formBlock(heading, spinner string) string {
+	if l.form == nil {
 		return titleStyle.Render(heading)
 	}
-	width := loginFieldWidth(m.width, m.loginBoxed())
-	// A fixed width also wraps anything Huh renders past the field, such as a
-	// long validation error, so it cannot widen the block and shift the card.
-	card := lipgloss.NewStyle().Width(width)
-	if m.loginBoxed() {
-		card = card.Width(width-2).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
+	content := strings.TrimRight(l.form.View(), "\n")
+	if l.busy {
+		text := "Finishing sign-in…"
+		switch {
+		case l.step == emailStep:
+			text = "Sending a code to " + safeText(strings.TrimSpace(l.values.email)) + "…"
+		case l.step == codeStep:
+			text = "Verifying code…"
+		case l.telegramLogin:
+			text = "Checking Telegram approval…"
+		}
+		content += "\n" + l.loader(spinner, text)
 	}
-	content := strings.TrimRight(m.loginForm.View(), "\n")
-	if m.busy {
-		// One row, so the card grows by as little as possible and the header
-		// keeps its place even on small terminals.
-		content += "\n" + m.loginLoader(loginFormWidth(m.width, m.loginBoxed()))
-	}
-	form := card.Render(content)
-	// Center whichever is narrower under the other, so the card stays on the
-	// screen's axis even when a heading (a long address) is wider than it.
-	title := titleStyle.Render(ansi.Truncate(heading, max(1, m.width-4), "…"))
-	if lipgloss.Width(title) < lipgloss.Width(form) {
-		title = lipgloss.PlaceHorizontal(lipgloss.Width(form), lipgloss.Center, title)
-	} else {
-		form = lipgloss.PlaceHorizontal(lipgloss.Width(title), lipgloss.Center, form)
-	}
-	return title + "\n" + form
+	return l.titled(heading, l.card(content))
 }
 
-// loginLoader is the in-card progress line shown under the submitted fields
-// while their request runs. It shares the status bar's spinner clock.
-func (m Model) loginLoader(width int) string {
-	text := "Finishing sign-in…"
-	switch {
-	case m.stage == emailStage:
-		text = "Sending a code to " + safeText(strings.TrimSpace(m.loginValues.email)) + "…"
-	case m.stage == codeStage:
-		text = "Verifying code…"
-	case m.telegramLogin:
-		text = "Checking Telegram approval…"
-	}
-	spinner := menuRailStyle.Render(spinnerFrames[m.status.frame%len(spinnerFrames)])
-	return spinner + " " + dimStyle.Render(ansi.Truncate(text, max(1, width-2), "…"))
+// loader is a progress row: the shared spinner and what is happening.
+func (l loginModel) loader(spinner, text string) string {
+	return spinner + " " + dimStyle.Render(ansi.Truncate(text, max(1, loginFormWidth(l.width, l.boxed())-2), "…"))
 }
 
-// loginView renders the provider selection screen. Shortcuts and transient
-// messages live in the footer; only a notice carried over from another screen
-// (such as a scheduled deletion) is shown here.
-func (m Model) loginView() string {
-	rows := []loginRow{{text: m.loginMenu(), center: true}}
-	if m.message != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
+// telegramBlock shows the approval wait: a live spinner, the time left, and,
+// if the browser did not open, the link to open by hand. The link sits below
+// the card so copying it does not pick up the card's border.
+func (l loginModel) telegramBlock(spinner string) string {
+	status := "Waiting for approval in your browser"
+	if l.busy {
+		status = "Checking approval…"
 	}
-	return m.loginScreen(rows)
+	remaining := "Attempt expired"
+	if left := time.Until(l.telegramExpires).Round(time.Second); left > 0 {
+		remaining = fmt.Sprintf("Expires in %d:%02d", int(left.Minutes()), int(left.Seconds())%60)
+	}
+	block := l.titled("Sign in with Telegram", l.card(l.loader(spinner, status)+"\n  "+dimStyle.Render(remaining)))
+	if l.telegramBrowserFailed {
+		width := loginFieldWidth(l.width, l.boxed())
+		link := ansi.Hardwrap(safeText(l.telegramURL), width, true)
+		block += "\n\n" + lipgloss.NewStyle().Width(width).Render(dimStyle.Render("Open this link to approve:")+"\n"+link)
+		block = composeRows([]loginRow{{text: block, center: true}})
+	}
+	return block
 }
 
-// loginStepView renders a provider step (email, code, profile, Telegram, or
-// restoration) under the same header as the welcome screen.
-func (m Model) loginStepView() string {
-	prose := m.stage == telegramStage || m.stage == restoreStage
-	rows := []loginRow{{text: m.loginBody(), center: !prose}}
-	if m.message != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
+// restoreBlock asks before restoring an account scheduled for deletion. The
+// ticket that authorizes restoration is never shown.
+func (l loginModel) restoreBlock(spinner string) string {
+	text := "This account is scheduled for deletion. Restoring it keeps its projects and notes; devices that were signed out stay signed out."
+	prompt := dimStyle.Render("Press ") + helpKeyStyle.Render("y") + dimStyle.Render(" to restore it, or ") + helpKeyStyle.Render("n") + dimStyle.Render(" to keep the deletion.")
+	if l.busy {
+		prompt = l.loader(spinner, "Restoring account…")
 	}
-	return m.loginScreen(rows)
+	return l.titled("Restore this account?", l.card(text+"\n\n"+prompt))
 }
 
-// loginHeaders lists the header variants from roomiest to tightest: each logo
+// headers lists the header variants from roomiest to tightest: each logo
 // with and without its tagline, the plain wordmark, then nothing.
-func (m Model) loginHeaders() []string {
+func (l loginModel) headers() []string {
 	tagline := dimStyle.Italic(true).Render("A quiet place for your notes")
 	var headers []string
 	for _, logo := range []string{largeLoginLogo, smallLoginLogo} {
-		if m.width >= lipgloss.Width(logo)+4 {
+		if l.width >= lipgloss.Width(logo)+4 {
 			art := renderLogo(logo)
 			headers = append(headers, lipgloss.JoinVertical(lipgloss.Center, art, "", tagline), art)
 		}
@@ -112,16 +133,16 @@ func (m Model) loginHeaders() []string {
 	return append(headers, titleStyle.Render("SHORTLOG"), "")
 }
 
-// loginScreen places the shared header above a screen's rows. The header is
+// screen places the shared header above a screen's rows. The header is
 // anchored where the welcome screen puts it, so moving between sign-in steps
 // swaps only what is below the tagline. A taller step lifts the header just
 // enough to fit; if it still does not fit, the header steps down a size, and
 // the rows after the first (a notice) are dropped as a last resort.
-func (m Model) loginScreen(rows []loginRow) string {
-	width, height := max(1, m.width), m.bodyHeight()
+func (l loginModel) screen(rows []loginRow) string {
+	width, height := max(1, l.width), max(1, l.height)
 	block := ""
 	for _, content := range [][]loginRow{rows, rows[:1]} {
-		for _, header := range m.loginHeaders() {
+		for _, header := range l.headers() {
 			stack := content
 			if header != "" {
 				stack = append([]loginRow{{text: header, center: true}, {text: "", center: true}}, content...)
@@ -132,18 +153,18 @@ func (m Model) loginScreen(rows []loginRow) string {
 			}
 			top := (height - lipgloss.Height(block)) / 2
 			if header != "" {
-				anchor := composeRows([]loginRow{{text: header, center: true}, {text: "", center: true}, {text: m.loginMenu(), center: true}})
+				anchor := composeRows([]loginRow{{text: header, center: true}, {text: "", center: true}, {text: l.menu(), center: true}})
 				top = min(max(0, (height-lipgloss.Height(anchor))/2), height-lipgloss.Height(block))
 			}
-			return m.placeLogin(block, top, width, height)
+			return placeLogin(block, top, width, height)
 		}
 	}
-	return m.placeLogin(block, 0, width, height)
+	return placeLogin(block, 0, width, height)
 }
 
 // placeLogin centers a composed block horizontally and puts it top rows down,
 // clamped to the space above the footer.
-func (m Model) placeLogin(block string, top, width, height int) string {
+func placeLogin(block string, top, width, height int) string {
 	block = lipgloss.NewStyle().MaxWidth(width).Render(block)
 	block = strings.Repeat("\n", max(0, top)) + block
 	return lipgloss.NewStyle().MaxHeight(height).Render(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, block))
@@ -178,15 +199,15 @@ func composeRows(rows []loginRow) string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// loginNotice frames a message carried over from a screen that has not moved
-// to the status line yet. Those are notices the user must read, such as a
+// notice frames a message carried over from a screen that has not moved to
+// the status line yet. Those are notices the user must read, such as a
 // deletion deadline, so they get a panel rather than the one-line footer.
-func (m Model) loginNotice() string {
-	width := min(54, max(1, m.width-4))
-	if m.bodyHeight() < 16 {
-		return lipgloss.NewStyle().Width(width).Foreground(lipgloss.Color("6")).Render(safeText(m.message))
+func (l loginModel) notice(text string) string {
+	width := min(54, max(1, l.width-4))
+	if l.height < 16 {
+		return lipgloss.NewStyle().Width(width).Foreground(lipgloss.Color("6")).Render(safeText(text))
 	}
-	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Render(safeText(m.message))
+	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Render(safeText(text))
 }
 
 var (
@@ -194,17 +215,17 @@ var (
 	menuRailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
-// loginMenu renders the provider choices. The list model still owns selection
+// menu renders the provider choices. The list model still owns selection
 // and key handling; this only draws it. The selected choice gets an accent
 // rail, and roomy terminals show a one-line hint under each choice.
-func (m Model) loginMenu() string {
+func (l loginModel) menu() string {
 	hints := []string{"We'll email you an 8-digit code", "Approve sign-in in your browser"}
-	detailed := m.width >= 40 && m.bodyHeight() >= 16
+	detailed := l.width >= 40 && l.height >= 16
 	var rows []string
-	for i, item := range m.loginOptions.Items() {
+	for i, item := range l.options.Items() {
 		number, label, _ := strings.Cut(item.(loginOption).label, "  ")
 		rail, numberStyle, labelStyle := " ", dimStyle, lipgloss.NewStyle()
-		if i == m.loginOptions.Index() {
+		if i == l.options.Index() {
 			rail, numberStyle, labelStyle = menuRailStyle.Render("▌"), titleStyle, titleStyle
 		}
 		if detailed && i > 0 {
