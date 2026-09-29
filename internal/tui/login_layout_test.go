@@ -118,56 +118,69 @@ func TestLoginStepsFitShortTerminals(t *testing.T) {
 	}
 }
 
-func TestLoginFormInputAlignsWithHeading(t *testing.T) {
+func TestLoginFormCardIsStable(t *testing.T) {
 	stripANSI := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	for _, size := range []struct{ width, height int }{{80, 24}, {120, 30}, {42, 16}} {
 		m := New(&fakeAPI{}, &fakeStore{})
 		m.stage, m.busy = loginStage, false
 		m.width, m.height = size.width, size.height
 		m.resizeLoginOptions()
+		logoRow := row(stripANSI.ReplaceAllString(m.View(), ""), "A quiet place")
 		m.showLoginForm(emailStage)
 		view := stripANSI.ReplaceAllString(m.View(), "")
-
-		heading, ok := find(view, "Sign in with email")
-		if !ok {
-			t.Fatalf("%dx%d: heading missing", m.width, m.height)
+		left, right := card(view)
+		if left < 0 {
+			t.Fatalf("%dx%d: no card: %q", m.width, m.height, view)
 		}
-		input, ok := find(view, "you@example.com")
-		if !ok {
-			t.Fatalf("%dx%d: input missing", m.width, m.height)
+		// The heading is centered over the card, and the whole composition is
+		// centered in the terminal.
+		if heading := centerOf(view, "Sign in with email"); abs(heading-(left+right)/2) > 1 {
+			t.Errorf("%dx%d: heading centered at %d, card at %d", m.width, m.height, heading, (left+right)/2)
 		}
-		// The field prompt and the heading should sit in the same column, so the
-		// form reads as one centered column rather than a left-hanging input.
-		// The field is a column of text; centering means the heading and the
-		// field share a midpoint, not a left edge (the field holds the prompt).
-		headingCenter := centerOf(view, "Sign in with email")
-		inputCenter := centerOf(view, "you@example.com")
-		if abs(headingCenter-inputCenter) > 2 {
-			t.Errorf("%dx%d: field centered at %d, heading at %d", m.width, m.height, inputCenter, headingCenter)
-		}
-		if abs(input.start-heading.start) > 3 {
-			t.Errorf("%dx%d: input starts at column %d, heading at %d", m.width, m.height, input.start, heading.start)
-		}
-		body := withoutFooter(view, m.footerHeight())
-		if abs(center(body)-m.width/2) > 2 {
+		if body := withoutFooter(view, m.footerHeight()); abs(center(body)-m.width/2) > 2 {
 			t.Errorf("%dx%d: composition center %d, want %d", m.width, m.height, center(body), m.width/2)
+		}
+		// Typing, loading, and the next step must not move or resize the card,
+		// nor move the header away from where the welcome screen put it.
+		m = typeText(m, "a.very.long.address.for.testing@example")
+		typed := stripANSI.ReplaceAllString(m.View(), "")
+		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+		loading := stripANSI.ReplaceAllString(m.View(), "")
+		if !strings.Contains(loading, "Sending a code") {
+			t.Errorf("%dx%d: no loader while sending: %q", m.width, m.height, loading)
+		}
+		next, _ := m.Update(cmd())
+		m = next.(Model)
+		code := stripANSI.ReplaceAllString(m.View(), "")
+		for name, v := range map[string]string{"typed": typed, "loading": loading, "code": code} {
+			if l, r := card(v); l != left || r != right {
+				t.Errorf("%dx%d %s: card moved from %d–%d to %d–%d", m.width, m.height, name, left, right, l, r)
+			}
+			if got := row(v, "A quiet place"); got != logoRow {
+				t.Errorf("%dx%d %s: tagline on row %d, welcome screen row %d", m.width, m.height, name, got, logoRow)
+			}
 		}
 	}
 }
 
-// hit is the column where the row containing a needle begins.
-type hit struct{ start int }
-
-func find(view, needle string) (hit, bool) {
+// card returns the columns of the rounded card's left and right corners.
+func card(view string) (int, int) {
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, needle) {
-			continue
+		if l, r := strings.Index(line, "╭"), strings.Index(line, "╮"); l >= 0 && r > l {
+			return lipgloss.Width(line[:l]), lipgloss.Width(line[:r])
 		}
-		// Report the display column where the row's visible content begins, so
-		// a field is measured from its bar, not from its placeholder text.
-		return hit{start: len(line) - len(strings.TrimLeft(line, " "))}, true
 	}
-	return hit{}, false
+	return -1, -1
+}
+
+// row returns the index of the first line containing a needle.
+func row(view, needle string) int {
+	for i, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	return -1
 }
 
 // centerOf returns the midpoint column of the line containing a needle.

@@ -171,3 +171,41 @@ func TestLoginOptionsAlignedAtBothSelections(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateEmail(t *testing.T) {
+	for address, valid := range map[string]bool{
+		"a@example.com":       true,
+		" a@example.com ":     true,
+		"a.b+tag@sub.io":      true,
+		"":                    false,
+		"a@":                  false,
+		"@example.com":        false,
+		"@@":                  false,
+		"a b@example.com":     false,
+		"Ari <a@example.com>": false,
+	} {
+		if err := validateEmail(address); (err == nil) != valid {
+			t.Errorf("validateEmail(%q) = %v, want valid=%v", address, err, valid)
+		}
+	}
+}
+
+func TestFailedEmailRequestKeepsFormEditable(t *testing.T) {
+	m := New(&fakeAPI{}, &fakeStore{})
+	m.stage, m.busy = loginStage, false
+	m.showLoginForm(emailStage)
+	m = typeText(m, "a@example.co")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || !strings.Contains(m.View(), "a@example.co") {
+		t.Fatal("submitted entry hidden while the request runs")
+	}
+	next, _ := m.Update(startResult{"", errors.New("offline")})
+	m = next.(Model)
+	m = typeText(m, "m")
+	if m.stage != emailStage || m.loginValues.email != "a@example.com" || !strings.Contains(m.View(), "a@example.com") {
+		t.Fatalf("entry not editable after failure: stage %d, value %q", m.stage, m.loginValues.email)
+	}
+	if m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter}); !m.busy || cmd == nil {
+		t.Fatal("corrected entry was not resubmitted")
+	}
+}

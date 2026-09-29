@@ -444,7 +444,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
 		if m.loginForm != nil {
-			m.loginForm.WithWidth(loginFormWidth(m.stage, m.width))
+			m.resizeLoginForm()
 			return m.updateLoginForm(msg)
 		}
 		return m, nil

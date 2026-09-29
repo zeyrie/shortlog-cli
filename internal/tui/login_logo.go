@@ -28,15 +28,17 @@ var (
 		" ██████╗ ", "██╔════╝ ", "██║  ███╗", "██║   ██║", "╚██████╔╝", " ╚═════╝ ", // G
 	})
 
+	// Half blocks give the compact logo the same solid weight as the large
+	// one in two rows: each cell holds two vertical pixels.
 	smallLoginLogo = wordmark(1,
-		[]string{"┏━┓", "┗━┓", "┗━┛"}, // S
-		[]string{"╻ ╻", "┣━┫", "╹ ╹"}, // H
-		[]string{"┏━┓", "┃ ┃", "┗━┛"}, // O
-		[]string{"┏━┓", "┣┳┛", "╹┗╸"}, // R
-		[]string{"╺┳╸", " ┃ ", " ╹ "}, // T
-		[]string{"╻  ", "┃  ", "┗━╸"}, // L
-		[]string{"┏━┓", "┃ ┃", "┗━┛"}, // O
-		[]string{"┏━╸", "┃╺┓", "┗━┛"}, // G
+		[]string{"█▀▀", "▄▄█"}, // S
+		[]string{"█ █", "█▀█"}, // H
+		[]string{"█▀█", "█▄█"}, // O
+		[]string{"█▀█", "█▀▄"}, // R
+		[]string{"▀█▀", " █ "}, // T
+		[]string{"█  ", "█▄▄"}, // L
+		[]string{"█▀█", "█▄█"}, // O
+		[]string{"█▀▀", "█▄█"}, // G
 	)
 )
 
@@ -69,12 +71,11 @@ func mustHex(hex string) colorful.Color {
 	return c
 }
 
-// renderLogo paints a wordmark with a left-to-right gradient. Solid blocks get
+// renderLogo paints a wordmark with a left-to-right gradient. Block glyphs get
 // the full color; the box-drawing shadow of the large logo is dimmed so the
 // letters read as raised.
 func renderLogo(logo string) string {
 	width := max(1, lipgloss.Width(logo)-1)
-	shadow := strings.Contains(logo, "█")
 	var b strings.Builder
 	for i, line := range strings.Split(logo, "\n") {
 		if i > 0 {
@@ -86,7 +87,7 @@ func renderLogo(logo string) string {
 				continue
 			}
 			c := logoFrom.BlendLuv(logoTo, float64(col)/float64(width)).Clamped()
-			if shadow && r != '█' {
+			if r >= '─' && r <= '╿' { // box drawing: the large logo's shadow
 				c = c.BlendLab(colorful.Color{}, 0.55).Clamped()
 			}
 			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render(string(r)))

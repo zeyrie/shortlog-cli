@@ -7,13 +7,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// loginHeading, loginOptions, and loginStatus compose the welcome screen; the
-// provider steps reuse the same centered layout with a compact wordmark.
+// loginBody renders the part of a sign-in step below the shared header.
 func (m Model) loginBody() string {
 	switch m.stage {
 	case emailStage:
-		form := m.formView()
-		return m.centerOver("Sign in with email", lipgloss.Width(form)) + "\n\n" + form
+		return m.formBlock("Sign in with email")
 	case telegramStage:
 		body := titleStyle.Render("Sign in with Telegram") + "\n\nApprove access in your browser. This attempt expires in about 10 minutes."
 		if m.telegramBrowserFailed {
@@ -21,96 +19,134 @@ func (m Model) loginBody() string {
 		}
 		return body
 	case codeStage:
-		form := m.formView()
-		return m.centerOver("Code sent to "+safeText(m.email), lipgloss.Width(form)) + "\n\n" + form
+		return m.formBlock("Code sent to " + safeText(m.email))
 	case profileStage:
-		form := m.formView()
-		return m.centerOver("Finish creating your account", lipgloss.Width(form)) + "\n\n" + form
+		return m.formBlock("Finish creating your account")
 	case restoreStage:
 		return "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
 	}
 	return ""
 }
 
-// centerOver centers a heading over a wider block so both share one axis.
-func (m Model) centerOver(text string, width int) string {
-	styled := titleStyle.Render(text)
-	if width <= lipgloss.Width(styled) {
-		return styled
-	}
-	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(styled)
-}
-
-func (m Model) formView() string {
+// formBlock stacks a heading over the step's form. The form has a fixed width
+// set by loginFieldWidth, so the heading is centered over the field itself and
+// neither moves while the user types.
+func (m Model) formBlock(heading string) string {
 	if m.loginForm == nil {
-		return ""
+		return titleStyle.Render(heading)
 	}
-	return cropVisible(m.loginForm.View())
+	width := loginFieldWidth(m.width, m.loginBoxed())
+	// A fixed width also wraps anything Huh renders past the field, such as a
+	// long validation error, so it cannot widen the block and shift the card.
+	card := lipgloss.NewStyle().Width(width)
+	if m.loginBoxed() {
+		card = card.Width(width-2).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
+	}
+	content := strings.TrimRight(m.loginForm.View(), "\n")
+	if m.busy {
+		// One row, so the card grows by as little as possible and the header
+		// keeps its place even on small terminals.
+		content += "\n" + m.loginLoader(loginFormWidth(m.width, m.loginBoxed()))
+	}
+	form := card.Render(content)
+	// Center whichever is narrower under the other, so the card stays on the
+	// screen's axis even when a heading (a long address) is wider than it.
+	title := titleStyle.Render(ansi.Truncate(heading, max(1, m.width-4), "…"))
+	if lipgloss.Width(title) < lipgloss.Width(form) {
+		title = lipgloss.PlaceHorizontal(lipgloss.Width(form), lipgloss.Center, title)
+	} else {
+		form = lipgloss.PlaceHorizontal(lipgloss.Width(title), lipgloss.Center, form)
+	}
+	return title + "\n" + form
 }
 
-// cropVisible trims a block to the columns that hold visible glyphs. Huh pads
-// each field line out to the field width; left in place, that padding would
-// be centered along with the text and push the input left of the heading.
-func cropVisible(block string) string {
-	lines := strings.Split(block, "\n")
-	left, right := -1, 0
-	for _, line := range lines {
-		plain := ansi.Strip(line)
-		trimmed := strings.TrimSpace(plain)
-		if trimmed == "" {
-			continue
-		}
-		start := lipgloss.Width(plain[:strings.Index(plain, trimmed)])
-		if left < 0 || start < left {
-			left = start
-		}
-		right = max(right, start+lipgloss.Width(trimmed))
+// loginLoader is the in-card progress line shown under the submitted fields
+// while their request runs. It shares the status bar's spinner clock.
+func (m Model) loginLoader(width int) string {
+	text := "Finishing sign-in…"
+	switch {
+	case m.stage == emailStage:
+		text = "Sending a code to " + safeText(strings.TrimSpace(m.loginValues.email)) + "…"
+	case m.stage == codeStage:
+		text = "Verifying code…"
+	case m.telegramLogin:
+		text = "Checking Telegram approval…"
 	}
-	if left < 0 {
-		return block
-	}
-	for i, line := range lines {
-		lines[i] = ansi.Cut(line, left, right)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) loginWordmark() string {
-	if m.width >= lipgloss.Width(smallLoginLogo)+4 && m.bodyHeight() >= 12 {
-		return smallLoginLogo
-	}
-	return "SHORTLOG"
+	spinner := menuRailStyle.Render(spinnerFrames[m.status.frame%len(spinnerFrames)])
+	return spinner + " " + dimStyle.Render(ansi.Truncate(text, max(1, width-2), "…"))
 }
 
 // loginView renders the provider selection screen. Shortcuts and transient
 // messages live in the footer; only a notice carried over from another screen
 // (such as a scheduled deletion) is shown here.
 func (m Model) loginView() string {
-	height := m.bodyHeight()
-	logo := "SHORTLOG"
-	switch {
-	case m.width >= lipgloss.Width(largeLoginLogo)+4 && height >= 18:
-		logo = largeLoginLogo
-	case m.width >= lipgloss.Width(smallLoginLogo)+4 && height >= 12:
-		logo = smallLoginLogo
-	}
-	heading := titleStyle.Render(logo)
-	if logo != "SHORTLOG" {
-		heading = renderLogo(logo)
-	}
-	if height >= 16 {
-		heading = lipgloss.JoinVertical(lipgloss.Center, heading, "", dimStyle.Italic(true).Render("A quiet place for your notes"))
-	}
-	options := m.loginMenu()
-	rows := []loginRow{{text: heading, center: true}, {text: "", center: true}, {text: options, center: true}}
+	rows := []loginRow{{text: m.loginMenu(), center: true}}
 	if m.message != "" {
 		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
 	}
-	content := composeRows(rows)
-	if lipgloss.Height(content) > height && m.message != "" {
-		content = composeRows([]loginRow{{text: options, center: true}, {text: m.loginNotice(), center: true}})
+	return m.loginScreen(rows)
+}
+
+// loginStepView renders a provider step (email, code, profile, Telegram, or
+// restoration) under the same header as the welcome screen.
+func (m Model) loginStepView() string {
+	prose := m.stage == telegramStage || m.stage == restoreStage
+	rows := []loginRow{{text: m.loginBody(), center: !prose}}
+	if m.message != "" {
+		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
 	}
-	return m.centerLogin(content)
+	return m.loginScreen(rows)
+}
+
+// loginHeaders lists the header variants from roomiest to tightest: each logo
+// with and without its tagline, the plain wordmark, then nothing.
+func (m Model) loginHeaders() []string {
+	tagline := dimStyle.Italic(true).Render("A quiet place for your notes")
+	var headers []string
+	for _, logo := range []string{largeLoginLogo, smallLoginLogo} {
+		if m.width >= lipgloss.Width(logo)+4 {
+			art := renderLogo(logo)
+			headers = append(headers, lipgloss.JoinVertical(lipgloss.Center, art, "", tagline), art)
+		}
+	}
+	return append(headers, titleStyle.Render("SHORTLOG"), "")
+}
+
+// loginScreen places the shared header above a screen's rows. The header is
+// anchored where the welcome screen puts it, so moving between sign-in steps
+// swaps only what is below the tagline. A taller step lifts the header just
+// enough to fit; if it still does not fit, the header steps down a size, and
+// the rows after the first (a notice) are dropped as a last resort.
+func (m Model) loginScreen(rows []loginRow) string {
+	width, height := max(1, m.width), m.bodyHeight()
+	block := ""
+	for _, content := range [][]loginRow{rows, rows[:1]} {
+		for _, header := range m.loginHeaders() {
+			stack := content
+			if header != "" {
+				stack = append([]loginRow{{text: header, center: true}, {text: "", center: true}}, content...)
+			}
+			block = composeRows(stack)
+			if lipgloss.Height(block) > height {
+				continue
+			}
+			top := (height - lipgloss.Height(block)) / 2
+			if header != "" {
+				anchor := composeRows([]loginRow{{text: header, center: true}, {text: "", center: true}, {text: m.loginMenu(), center: true}})
+				top = min(max(0, (height-lipgloss.Height(anchor))/2), height-lipgloss.Height(block))
+			}
+			return m.placeLogin(block, top, width, height)
+		}
+	}
+	return m.placeLogin(block, 0, width, height)
+}
+
+// placeLogin centers a composed block horizontally and puts it top rows down,
+// clamped to the space above the footer.
+func (m Model) placeLogin(block string, top, width, height int) string {
+	block = lipgloss.NewStyle().MaxWidth(width).Render(block)
+	block = strings.Repeat("\n", max(0, top)) + block
+	return lipgloss.NewStyle().MaxHeight(height).Render(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, block))
 }
 
 // loginRow is one block of a sign-in screen. Centered rows sit on the shared
@@ -140,42 +176,6 @@ func composeRows(rows []loginRow) string {
 		parts = append(parts, lipgloss.PlaceHorizontal(column, align, block))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
-}
-
-// loginStepView renders a provider step (email, code, profile, Telegram, or
-// restoration) with the same centered composition as the welcome screen.
-func (m Model) loginStepView() string {
-	height := m.bodyHeight()
-	body := m.loginBody()
-	prose := m.stage == telegramStage || m.stage == restoreStage
-	wordmark := titleStyle.Render(m.loginWordmark())
-	if m.loginWordmark() != "SHORTLOG" {
-		wordmark = renderLogo(m.loginWordmark())
-	}
-	rows := []loginRow{{text: wordmark, center: true}, {text: "", center: true}, {text: body, center: !prose}}
-	if m.message != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
-	}
-	// On short terminals drop the wordmark first, then the notice.
-	if height < 16 {
-		rows = rows[2:]
-	}
-	content := composeRows(rows)
-	if lipgloss.Height(content) > height && len(rows) > 2 {
-		content = composeRows(rows[2:])
-	}
-	if lipgloss.Height(content) > height && m.message != "" {
-		content = composeRows([]loginRow{{text: body, center: !prose}})
-	}
-	return m.centerLogin(content)
-}
-
-// centerLogin clamps the composition to the space above the footer and
-// centers it, so no part of a sign-in step can spill past an edge.
-func (m Model) centerLogin(content string) string {
-	width, height := max(1, m.width), m.bodyHeight()
-	content = lipgloss.NewStyle().MaxWidth(width).Render(content)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
 // loginNotice frames a message carried over from a screen that has not moved
