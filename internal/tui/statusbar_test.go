@@ -61,14 +61,29 @@ func TestStatusHistoryIsBounded(t *testing.T) {
 	}
 }
 
-func TestStatusBeatIsFastOnlyWhileBusy(t *testing.T) {
+func TestStatusBeatAdvancesSpinnerOnlyWhileBusy(t *testing.T) {
 	var s statusBar
 	if s.beat(true, time.Now()) == nil || s.frame != 1 {
 		t.Fatal("busy beat did not advance the spinner")
 	}
-	s.beat(false, time.Now())
-	if s.frame != 1 {
-		t.Fatal("idle beat advanced the spinner")
+	if s.beat(false, time.Now()) == nil || s.frame != 1 {
+		t.Fatal("idle beat stopped the clock or advanced the spinner")
+	}
+}
+
+func TestFooterDefersToCardLoader(t *testing.T) {
+	m := New(&fakeAPI{}, &fakeStore{})
+	m.stage, m.busy, m.origin = loginStage, false, "http://127.0.0.1:8080"
+	m.showLoginForm(emailStage)
+	m = typeText(m, "a@example.com")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	footer := stripStatusANSI.ReplaceAllString(m.footer(), "")
+	status := footer[strings.LastIndex(footer, "\n")+1:]
+	if strings.Contains(status, "Sending") || strings.ContainsAny(status, strings.Join(spinnerFrames, "")) || !strings.Contains(status, "127.0.0.1:8080") {
+		t.Fatalf("footer repeats the card loader: %q", status)
+	}
+	if len(m.status.history) == 0 || m.status.history[len(m.status.history)-1].text != "Sending email code…" {
+		t.Fatal("hidden message was not kept in history")
 	}
 }
 

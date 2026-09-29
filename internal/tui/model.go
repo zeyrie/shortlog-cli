@@ -217,7 +217,7 @@ func New(client emailAPI, store sessionStore) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, statusTick(idleBeat), func() tea.Msg {
+	return tea.Batch(textinput.Blink, statusTick(), func() tea.Msg {
 		token, err := m.store.Load()
 		return loadedSession{token, err}
 	})
@@ -1485,11 +1485,21 @@ func (m Model) footerHeight() int {
 	return 2
 }
 
+// cardLoading reports whether a sign-in card is showing its own loader.
+func (m Model) cardLoading() bool {
+	return m.busy && m.loginForm != nil && (m.stage == emailStage || m.stage == codeStage || m.stage == profileStage)
+}
+
 func (m Model) bodyHeight() int { return max(1, m.height-m.footerHeight()) }
 
 // footer renders the shortcut line above the status line.
 func (m Model) footer() string {
 	status := m.status.view(m.width, m.busy, m.statusContext())
+	if m.cardLoading() {
+		// The card already shows the spinner and what is happening; keep the
+		// footer to its context rather than saying it twice.
+		status = statusBar{}.view(m.width, false, m.statusContext())
+	}
 	if m.footerHeight() == 1 {
 		return status
 	}

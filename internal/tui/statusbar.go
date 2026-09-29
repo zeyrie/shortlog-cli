@@ -23,8 +23,10 @@ const (
 const (
 	statusInfoTTL      = 4 * time.Second
 	statusHistoryLimit = 50
-	busyBeat           = 100 * time.Millisecond
-	idleBeat           = time.Second
+	// statusBeatInterval is one spinner frame. The beat runs at this pace even
+	// when idle, so a spinner starts moving as soon as a request does; Bubble
+	// Tea's renderer already wakes about 60 times a second, so this adds little.
+	statusBeatInterval = 100 * time.Millisecond
 )
 
 const (
@@ -74,20 +76,18 @@ func (s *statusBar) dismiss() {
 }
 
 // beat advances the spinner while busy and expires stale info when idle, then
-// schedules the next beat: fast while a request runs, slow otherwise.
+// schedules the next beat.
 func (s *statusBar) beat(busy bool, now time.Time) tea.Cmd {
-	interval := idleBeat
 	if busy {
 		s.frame++
-		interval = busyBeat
 	} else if s.current.level == statusInfo && s.current.text != "" && now.Sub(s.current.at) >= statusInfoTTL {
 		s.clear()
 	}
-	return statusTick(interval)
+	return statusTick()
 }
 
-func statusTick(interval time.Duration) tea.Cmd {
-	return tea.Tick(interval, func(time.Time) tea.Msg { return statusBeat{} })
+func statusTick() tea.Cmd {
+	return tea.Tick(statusBeatInterval, func(time.Time) tea.Msg { return statusBeat{} })
 }
 
 // view renders the message line: a spinner or level marker, the message, and
