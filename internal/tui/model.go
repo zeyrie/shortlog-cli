@@ -21,7 +21,7 @@ type Client interface {
 	workspaceClient
 }
 
-type sessionStore interface {
+type SessionStore interface {
 	Load() (string, error)
 	Save(string) error
 	Delete() error
@@ -42,7 +42,7 @@ const (
 // screens report to it through state it reads after each update.
 type Model struct {
 	api       Client
-	store     sessionStore
+	store     SessionStore
 	stage     stage
 	login     loginModel
 	workspace workspaceModel
@@ -52,15 +52,22 @@ type Model struct {
 	token     string       // never rendered or logged
 	resume    *unsentDraft // text to reopen after signing in again
 	demo      bool         // started with sample data and no server
-	busy      bool         // a request is running on the sign-in screen, or the saved session is loading
+	servers   Servers      // nil in the demo, which has no server to change
+	// serverPopup, when set, asks for a server address over either screen.
+	serverPopup *popupState
+	// serverOverride is an address that failed its health check and that the
+	// user may connect to anyway by accepting again.
+	serverOverride string
+	popupKeys      workspaceKeyMap
+	busy           bool // a request is running on the sign-in screen, or the saved session is loading
 	// message is a notice for the sign-in screen, such as why the session
 	// ended; it is too important for the one-line status bar.
 	message       string
 	width, height int
 }
 
-func New(client Client, store sessionStore) Model {
-	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, help: newHelp()}
+func New(client Client, store SessionStore) Model {
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, help: newHelp(), popupKeys: defaultWorkspaceKeys()}
 	if origin, ok := client.(interface{ Origin() string }); ok {
 		m.origin = origin.Origin()
 	}
@@ -73,11 +80,7 @@ func (m Model) Init() tea.Cmd {
 	if m.demo {
 		return tea.Batch(statusTick(), tea.RequestBackgroundColor)
 	}
-	store := m.store
-	return tea.Batch(statusTick(), tea.RequestBackgroundColor, func() tea.Msg {
-		token, err := store.Load()
-		return loadedSession{token, err}
-	})
+	return tea.Batch(statusTick(), tea.RequestBackgroundColor, m.loadSession())
 }
 
 // loadedSession is the saved session read from the credential store.
@@ -92,6 +95,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.login.setSize(m.width, m.bodyHeight())
 		m.workspace.setSize(m.width, m.bodyHeight())
+		if m.serverPopup != nil {
+			m.serverPopup.setSize(m.width, m.bodyHeight())
+		}
 		if m.stage == loginStage {
 			return m.updateLogin(msg)
 		}
@@ -119,6 +125,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.status.beat(m.busy, time.Now())
 	case loadedSession:
 		return m.onLoadedSession(msg)
+	case serverChecked:
+		return m.onServerChecked(msg)
 	case telegramStartResult, telegramBrowserResult, telegramTick, telegramPollResult, startResult, verifyResult, restoreResult:
 		return m.updateLogin(msg)
 	case tea.KeyPressMsg:
@@ -131,6 +139,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
+	}
+	if m.serverPopup != nil {
+		return m.updateServerPopup(message)
 	}
 	switch m.stage {
 	case loginStage:
@@ -191,6 +202,7 @@ func (m *Model) openWorkspace(token string) tea.Cmd {
 	m.message = ""
 	host := strings.TrimPrefix(strings.TrimPrefix(m.origin, "https://"), "http://")
 	m.workspace = newWorkspace(m.api, token, host)
+	m.workspace.account.origin = m.origin
 	m.workspace.setSize(m.width, m.bodyHeight())
 	cmd := m.workspace.start()
 	if m.resume != nil {
@@ -218,6 +230,10 @@ func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.workspace.expired {
 		m.expireSession()
 		return m, nil
+	}
+	if m.workspace.wantServer {
+		m.workspace.wantServer = false
+		m.openServerPopup()
 	}
 	if out := m.workspace.signOut; out != nil {
 		return m, m.endSession(out.notice)
@@ -309,6 +325,10 @@ func (m Model) updateLogin(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus(note.level, note.text)
 		}
+	}
+	if m.login.wantServer {
+		m.login.wantServer = false
+		m.openServerPopup()
 	}
 	if token := m.login.token; token != "" {
 		m.login = m.login.reset()
@@ -495,5 +515,9 @@ func (m Model) render() string {
 	default:
 		body = lipgloss.Place(max(m.width, 1), m.bodyHeight(), lipgloss.Center, lipgloss.Center, dimStyle.Render("Opening your saved session…"))
 	}
-	return lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(body) + "\n" + m.footer()
+	body = lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(body)
+	if m.serverPopup != nil {
+		body = overlay(body, m.serverPopup.View(m.width, m.bodyHeight(), m.status.spinner()), max(m.width, 1), m.bodyHeight())
+	}
+	return body + "\n" + m.footer()
 }

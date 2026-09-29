@@ -27,7 +27,7 @@ type loginKeyMap struct {
 	ChooseEmail, ChooseTelegram, Continue, Select, Quit key.Binding
 	Next, PrevField, UseTelegram, Back                  key.Binding
 	Check, Reopen, Copy, Cancel                         key.Binding
-	Restore, Decline                                    key.Binding
+	Restore, Decline, Server                            key.Binding
 }
 
 func defaultLoginKeys() loginKeyMap {
@@ -47,6 +47,7 @@ func defaultLoginKeys() loginKeyMap {
 		Cancel:         keyCancel,
 		Restore:        bind("y", "restore", "y", "Y"),
 		Decline:        bind("n", "cancel", "n", "N"),
+		Server:         bind("s", "server", "s"),
 	}
 }
 
@@ -55,7 +56,7 @@ func (l loginModel) ShortHelp() []key.Binding {
 	k := l.keys
 	switch l.step {
 	case menuStep:
-		return []key.Binding{k.Continue, bind("1/2", "choose", "1", "2"), k.Select, k.Quit}
+		return []key.Binding{k.Continue, bind("1/2", "choose", "1", "2"), k.Select, k.Server, k.Quit}
 	case emailStep:
 		return []key.Binding{bind("enter", "send code", "enter"), k.UseTelegram, bind("esc", "sign-in options", "esc"), keyForceQuit}
 	case codeStep:
@@ -82,6 +83,9 @@ func newHelp() help.Model {
 // shortcuts lists the footer hints for the current screen, most important
 // first: the help line drops trailing hints when the terminal is narrow.
 func (m Model) shortcuts() []key.Binding {
+	if m.serverPopup != nil {
+		return m.serverPopup.ShortHelp(m.popupKeys)
+	}
 	switch m.stage {
 	case loginStage:
 		return m.login.ShortHelp()

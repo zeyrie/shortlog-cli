@@ -48,6 +48,7 @@ const (
 	revokeAllAction
 	signOutAction
 	deleteAccountAction
+	serverAction
 	discardEditAction
 	quitAction
 )
@@ -384,6 +385,8 @@ func (p popupState) busyText() string {
 		return "Signing out…"
 	case deleteAccountAction:
 		return "Requesting deletion…"
+	case serverAction:
+		return "Checking the server…"
 	}
 	return "Working…"
 }

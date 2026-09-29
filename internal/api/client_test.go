@@ -579,3 +579,26 @@ func TestTelegramLoginEndpoints(t *testing.T) {
 		t.Fatalf("restore: %q %v", token, err)
 	}
 }
+
+func TestHealth(t *testing.T) {
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" || r.Header.Get("Authorization") != "" {
+			t.Errorf("health check sent %s with auth %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(status)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatalf("healthy server: %v", err)
+	}
+	status = http.StatusServiceUnavailable
+	var apiErr *Error
+	if err := client.Health(context.Background()); !errors.As(err, &apiErr) || apiErr.Status != 503 {
+		t.Fatalf("unhealthy server: %v", err)
+	}
+}

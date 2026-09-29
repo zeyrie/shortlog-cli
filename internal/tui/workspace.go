@@ -65,6 +65,8 @@ type workspaceModel struct {
 	expired bool         // a request was refused with 401; the root signs out
 	unsent  *unsentDraft // text the expired session could not save
 	signOut *signOut     // the session ended by request; the root signs out
+	// wantServer asks the root to open the server popup.
+	wantServer bool
 }
 
 func newWorkspace(client workspaceClient, token, server string) workspaceModel {
@@ -244,6 +246,8 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 		w.startSignOut()
 	case key.Matches(msg2, k.DeleteAccount) && w.onAccountPage():
 		w.startDeleteAccount()
+	case key.Matches(msg2, k.Server) && w.onAccountPage():
+		w.wantServer = true
 	case (key.Matches(msg2, k.Up) || key.Matches(msg2, k.Down)) && w.onAccountPage():
 		delta := 1
 		if key.Matches(msg2, k.Up) {
@@ -435,7 +439,7 @@ type workspaceKeyMap struct {
 	New, Edit, Move, Delete, NewProject, Archive       key.Binding
 	Unarchive, Save, Yes, No                           key.Binding
 	EditProfile, RevokeSession, RevokeAll, SignOut     key.Binding
-	DeleteAccount                                      key.Binding
+	DeleteAccount, Server                              key.Binding
 }
 
 func defaultWorkspaceKeys() workspaceKeyMap {
@@ -469,6 +473,7 @@ func defaultWorkspaceKeys() workspaceKeyMap {
 		RevokeAll:     bind("a", "revoke all", "a"),
 		SignOut:       bind("l", "sign out", "l"),
 		DeleteAccount: bind("D", "delete account", "D"),
+		Server:        bind("s", "server", "s"),
 		No:            bind("n/esc", "no", "n", "N", "esc"),
 		Quit:          bind("q", "quit", "q"),
 	}
@@ -517,5 +522,5 @@ func (w workspaceModel) accountHelp(nav key.Binding) []key.Binding {
 	if !w.accountState.loaded {
 		return []key.Binding{k.Refresh, panels, k.Quit}
 	}
-	return []key.Binding{k.EditProfile, bind("↑/↓", "session", "up", "down"), k.RevokeSession, k.SignOut, k.RevokeAll, k.DeleteAccount, nav, k.Refresh, panels, k.Quit}
+	return []key.Binding{k.EditProfile, bind("↑/↓", "session", "up", "down"), k.RevokeSession, k.SignOut, k.Server, k.RevokeAll, k.DeleteAccount, nav, k.Refresh, panels, k.Quit}
 }

@@ -81,6 +81,8 @@ type loginModel struct {
 
 	note  *statusNote
 	token string // set when sign-in succeeds; the root takes it and resets the screen
+	// wantServer asks the root to open the server popup.
+	wantServer bool
 }
 
 // Results of the sign-in screen's requests.
@@ -290,6 +292,9 @@ func (l loginModel) updateMenu(msg tea.KeyPressMsg) (loginModel, tea.Cmd) {
 		return l, l.startTelegram(menuStep)
 	case key.Matches(msg, l.keys.Quit):
 		return l, tea.Quit
+	case key.Matches(msg, l.keys.Server):
+		l.wantServer = true
+		return l, nil
 	}
 	var cmd tea.Cmd
 	l.options, cmd = l.options.Update(msg)

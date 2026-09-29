@@ -16,7 +16,8 @@ type accountPanel struct {
 	account     api.Account
 	sessions    []api.Session
 	sessionsErr string
-	server      string
+	server      string     // host, for the panel line
+	origin      string     // full address, for the page
 	list        scrollList // the selected session
 }
 
@@ -73,6 +74,10 @@ func (a accountPanel) page(width, height int, focused bool, state loadState, spi
 		}
 		row := lipgloss.NewStyle().Width(max(width-26, 12)).Render(name) + dimStyle.Render(lastUsed(s.LastUsedAt, now))
 		b.WriteString(listRow(row, i == a.list.cursor, focused, width-2) + "\n")
+	}
+	if a.origin != "" {
+		b.WriteString("\n " + section.Render("Server") + hint("s", "change") + "\n")
+		b.WriteString("  " + safeText(a.origin) + "\n")
 	}
 	b.WriteString("\n " + section.Render("Sign out of this device") + hint("l", "sign out") + "\n")
 	b.WriteString(" " + errStyle.Render("Delete account") + hint("D", "delete…"))

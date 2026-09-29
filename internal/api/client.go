@@ -31,6 +31,25 @@ func NewClient(address string, httpClient *http.Client) (*Client, error) {
 	return &Client{baseURL: strings.TrimRight(u.String(), "/"), http: httpClient}, nil
 }
 
+// Health reports whether the server answers its health check, which needs
+// no session: a quick way to tell a reachable Shortlog server from a typo.
+func (c *Client) Health(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/healthz", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return &Error{Status: resp.StatusCode, Code: "unhealthy"}
+	}
+	return nil
+}
+
 type Error struct {
 	Status int
 	Code   string
