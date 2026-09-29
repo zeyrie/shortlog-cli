@@ -99,6 +99,8 @@ func (m Model) shortcuts() []key.Binding {
 		return []key.Binding{keyForceQuit}
 	case loginStage:
 		return m.login.ShortHelp()
+	case workspaceStage:
+		return m.workspace.ShortHelp()
 	case inboxStage:
 		if m.archivedProject() {
 			return []key.Binding{bind("enter", "read", "enter"), keySelect, keyOlder, keyRefresh, keyProjects, keySessions, keyAccount, keyBack, keyQuit}

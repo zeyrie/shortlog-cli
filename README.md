@@ -10,6 +10,8 @@ Start the Shortlog server and its database, with email OTP delivery configured. 
 go run ./cmd/shortlog
 ```
 
+To try the new workspace layout without a server, run `go run ./cmd/shortlog -demo`. It opens straight into the workspace with sample data; nothing is sent anywhere. Use `0`–`3` or `Tab` to move between panels, `j`/`k` to move within one, `[`/`]` to switch a panel's tabs, `Enter` to open, `Esc` to go back, and `q` to quit. The workspace is not yet connected to the API.
+
 The default API origin is `http://127.0.0.1:8080`. For another server, pass `-api-url https://your-host`. Use HTTPS for a remote server: email codes and session tokens must not travel over plaintext HTTP.
 
 Every screen ends with a two-line footer: the first line lists the shortcuts for the current screen (trailing ones are dropped on narrow terminals), and the second is a status line for progress and messages, with the signed-in name and server on the right. Status messages fade after a few seconds; warnings and errors stay until you press a key. Prompts and important notices, such as a scheduled deletion date, stay in the main area.

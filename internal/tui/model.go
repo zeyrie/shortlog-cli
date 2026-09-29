@@ -76,6 +76,7 @@ const (
 	accountEditStage
 	accountDiscardStage
 	accountDeleteStage
+	workspaceStage // the lazygit-style workspace; see workspace.go
 )
 
 type sessionAction int
@@ -108,6 +109,8 @@ type Model struct {
 	help              help.Model
 	origin            string // API origin, shown in the status line
 	login             loginModel
+	workspace         workspaceModel
+	demo              bool   // started with sample data and no server
 	token             string // Never rendered or logged.
 	username          string
 	account           api.Account
@@ -194,6 +197,9 @@ func New(client emailAPI, store sessionStore) Model {
 }
 
 func (m Model) Init() tea.Cmd {
+	if m.demo {
+		return tea.Batch(statusTick(), tea.RequestBackgroundColor)
+	}
 	return tea.Batch(textinput.Blink, statusTick(), tea.RequestBackgroundColor, func() tea.Msg {
 		token, err := m.store.Load()
 		return loadedSession{token, err}
@@ -416,6 +422,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.login.setSize(m.width, m.bodyHeight())
+		m.workspace.setSize(m.width, m.bodyHeight())
 		m.resizeReader()
 		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
@@ -871,6 +878,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.stage == loginStage {
 			return m.updateLogin(msg)
+		}
+		if m.stage == workspaceStage {
+			return m.updateWorkspace(msg)
 		}
 		if m.busy {
 			return m, nil
@@ -1423,7 +1433,28 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stage == loginStage {
 		return m.updateLogin(message)
 	}
+	if m.stage == workspaceStage {
+		return m.updateWorkspace(message)
+	}
 	return m, nil
+}
+
+// NewDemo starts straight in the workspace with sample data and no server,
+// for trying the layout. Nothing it shows is sent anywhere.
+func NewDemo() Model {
+	m := New(nil, nil)
+	m.demo, m.stage, m.busy = true, workspaceStage, false
+	data := demoData(time.Now())
+	m.token, m.username, m.origin = "demo", data.account.Username, "demo"
+	m.workspace = newWorkspace(data)
+	m.workspace.setSize(m.width, m.bodyHeight())
+	return m
+}
+
+func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.workspace, cmd = m.workspace.Update(msg)
+	return m, cmd
 }
 
 // openLogin shows the sign-in screen from its first step, with no attempt in
@@ -1764,6 +1795,9 @@ func (m Model) View() tea.View {
 func (m Model) render() string {
 	if m.stage == loginStage {
 		return m.login.View(m.message, m.status.spinner()) + "\n" + m.footer()
+	}
+	if m.stage == workspaceStage {
+		return lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(m.workspace.View()) + "\n" + m.footer()
 	}
 	var body string
 	switch m.stage {

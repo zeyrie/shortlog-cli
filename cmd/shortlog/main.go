@@ -13,7 +13,15 @@ import (
 
 func main() {
 	address := flag.String("api-url", "http://127.0.0.1:8080", "Shortlog API origin")
+	demo := flag.Bool("demo", false, "open the workspace with sample data and no server")
 	flag.Parse()
+	if *demo {
+		if _, err := tea.NewProgram(tui.NewDemo()).Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "TUI failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	client, err := api.NewClient(*address, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
