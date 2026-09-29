@@ -95,7 +95,11 @@ func TestNotesTabsFollowTheSelectedProject(t *testing.T) {
 		t.Fatal("the notes panel should open on the Inbox")
 	}
 	m, _ = press(m, runeKey('2'))
-	m, _ = press(m, runeKey('j')) // Reading list
+	m, cmd := press(m, runeKey('j')) // Reading list, whose notes load now
+	if !strings.Contains(plain(m), "Loading notes") {
+		t.Fatal("a project's first selection should show its notes loading")
+	}
+	m = feed(m, cmd)
 	if m.workspace.notes.tab != projectTab || m.workspace.notes.current.Name != "Reading list" {
 		t.Fatal("moving in projects did not show that project's notes")
 	}

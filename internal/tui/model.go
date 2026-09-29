@@ -438,6 +438,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.login, cmd = m.login.Update(msg)
 		return m, cmd
+	case accountLoaded, projectsLoaded, notesLoaded:
+		if m.stage != workspaceStage {
+			return m, nil // a late result for a session that has ended
+		}
+		return m.updateWorkspace(msg)
+	case sessionSaved:
+		if msg.err != nil {
+			m.setStatus(statusWarn, "Could not save the session to the credential store; you may need to sign in next time.")
+		}
+		return m, nil
 	case statusBeat:
 		return m, m.status.beat(m.busy, time.Now())
 	case loadedSession:
@@ -1440,21 +1450,102 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // NewDemo starts straight in the workspace with sample data and no server,
-// for trying the layout. Nothing it shows is sent anywhere.
+// for trying the layout. Nothing it shows is sent anywhere. The sample data
+// is served through the workspace's API interface, and the first loads are
+// applied up front so the demo opens ready.
 func NewDemo() Model {
 	m := New(nil, nil)
-	m.demo, m.stage, m.busy = true, workspaceStage, false
-	data := demoData(time.Now())
-	m.token, m.username, m.origin = "demo", data.account.Username, "demo"
-	m.workspace = newWorkspace(data)
+	m.demo, m.stage, m.busy, m.token, m.origin = true, workspaceStage, false, "demo", "demo"
+	m.workspace = newWorkspace(newDemoAPI(time.Now()), m.token, "demo")
 	m.workspace.setSize(m.width, m.bodyHeight())
+	m.workspace = settle(m.workspace, m.workspace.start())
 	return m
 }
 
+// settle runs a command's requests at once and applies their results, for
+// the demo, whose API answers locally. Requests those results start are
+// settled too.
+func settle(w workspaceModel, cmd tea.Cmd) workspaceModel {
+	for _, msg := range runCmd(cmd) {
+		var next tea.Cmd
+		w, next = w.Update(msg)
+		w = settle(w, next)
+	}
+	return w
+}
+
+// runCmd runs a command and any commands it batches, returning their
+// messages.
+func runCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
+	}
+	var msgs []tea.Msg
+	for _, c := range batch {
+		msgs = append(msgs, runCmd(c)...)
+	}
+	return msgs
+}
+
+// openWorkspace shows the workspace for a session and starts loading it.
+func (m *Model) openWorkspace(token string) tea.Cmd {
+	m.token, m.stage, m.busy = token, workspaceStage, false
+	m.status.clear()
+	m.message = ""
+	m.inputs[m.focus].Blur()
+	host := strings.TrimPrefix(strings.TrimPrefix(m.origin, "https://"), "http://")
+	m.workspace = newWorkspace(m.api, token, host)
+	m.workspace.setSize(m.width, m.bodyHeight())
+	return m.workspace.start()
+}
+
+// updateWorkspace runs the workspace and applies what it reports: a status
+// change, and an expired session, which signs out.
 func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.workspace, cmd = m.workspace.Update(msg)
+	if note := m.workspace.note; note != nil {
+		m.workspace.note = nil
+		m.setStatus(note.level, note.text)
+	}
+	if m.workspace.expired {
+		m.expireSession()
+		return m, nil
+	}
 	return m, cmd
+}
+
+// expireSession signs out after the server refused the session: the saved
+// credential is removed and sign-in explains why.
+func (m *Model) expireSession() {
+	if m.store != nil {
+		_ = m.store.Delete()
+	}
+	m.token = ""
+	m.workspace = workspaceModel{}
+	m.openLogin()
+	m.message = "Session expired. Sign in again."
+}
+
+// sessionSaved reports whether the OS credential store kept a new session.
+type sessionSaved struct{ err error }
+
+// saveSession stores a new session. A failure leaves nothing half-saved: an
+// older session for the same server must not linger.
+func (m Model) saveSession(token string) tea.Cmd {
+	store := m.store
+	return func() tea.Msg {
+		err := store.Save(token)
+		if err != nil {
+			_ = store.Delete()
+		}
+		return sessionSaved{err}
+	}
 }
 
 // openLogin shows the sign-in screen from its first step, with no attempt in
@@ -1505,27 +1596,14 @@ func (m Model) onLoadedSession(msg loadedSession) (tea.Model, tea.Cmd) {
 		m.openLogin()
 		return m, nil
 	}
-	m.token = msg.token
-	m.message = "Checking saved session…"
-	return m, m.loadInbox(msg.token, false)
+	// The workspace checks the saved session as it loads: a 401 signs out
+	// and clears it, while a network failure keeps it for a retry.
+	return m, m.openWorkspace(msg.token)
 }
 
-// signedIn starts a fresh session: it clears what a previous one left behind
-// and loads the Inbox.
+// signedIn opens the workspace for a new session and saves it.
 func (m *Model) signedIn(token string) tea.Cmd {
-	m.token = token
-	m.activeProject = nil
-	m.projects = nil
-	m.projectSelected = 0
-	m.showArchived = false
-	m.inboxList = noteList{}
-	m.inboxStashed = false
-	m.inboxNeedsRefresh = false
-	m.stage = inboxStage
-	m.busy = true
-	m.status.clear()
-	m.message = "Loading Inbox…"
-	return m.loadInbox(token, true)
+	return tea.Batch(m.openWorkspace(token), m.saveSession(token))
 }
 
 // setStatus shows a message on the status line and drops any body message, so
@@ -1584,11 +1662,15 @@ func (m Model) footer() string {
 // right edge.
 func (m Model) statusContext() string {
 	host := strings.TrimPrefix(strings.TrimPrefix(m.origin, "https://"), "http://")
-	if m.token != "" && m.username != "" {
+	name := m.username
+	if m.stage == workspaceStage {
+		name = m.workspace.userName()
+	}
+	if m.token != "" && name != "" {
 		if host == "" {
-			return preview(m.username, 24)
+			return preview(name, 24)
 		}
-		return preview(m.username, 24) + " · " + host
+		return preview(name, 24) + " · " + host
 	}
 	return host
 }
@@ -1785,7 +1867,7 @@ func (m Model) View() tea.View {
 	// Terminals that support it (such as Windows Terminal and Ghostty) show
 	// their own progress indicator in the tab while a request runs or while
 	// Telegram approval is pending; others ignore it.
-	if m.busy || (m.stage == loginStage && m.login.step == telegramStep) {
+	if m.busy || (m.stage == loginStage && m.login.step == telegramStep) || (m.stage == workspaceStage && m.workspace.loading()) {
 		v.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 	}
 	return v
@@ -1797,7 +1879,7 @@ func (m Model) render() string {
 		return m.login.View(m.message, m.status.spinner()) + "\n" + m.footer()
 	}
 	if m.stage == workspaceStage {
-		return lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(m.workspace.View()) + "\n" + m.footer()
+		return lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(m.workspace.View(m.status.spinner())) + "\n" + m.footer()
 	}
 	var body string
 	switch m.stage {

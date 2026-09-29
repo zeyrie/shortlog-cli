@@ -66,22 +66,24 @@ func (p projectsPanel) Update(msg tea.KeyPressMsg, keys workspaceKeyMap) (projec
 	return p, after.ID != before.ID
 }
 
-func (p projectsPanel) View(width, height int, focused bool) string {
+func (p projectsPanel) View(width, height int, focused bool, state loadState, spinner string) string {
 	items, list := p.items(), p.lists[p.tab]
 	rows := max(height-2, 1)
 	list.clamp(len(items), rows) // a short terminal may show fewer rows than the cap
-	var body []string
-	if len(items) == 0 {
+	body := stateRows(state, len(items) > 0, spinner, "projects")
+	if len(items) == 0 && len(body) == 0 {
 		empty := "No active projects"
 		if p.tab == archivedTab {
 			empty = "No archived projects"
 		}
 		body = append(body, "   "+dimStyle.Render(empty))
 	}
+	var rowsOut []string
 	start, end := list.window(len(items), rows)
 	for i := start; i < end; i++ {
-		body = append(body, listRow(safeText(items[i].Name), i == list.cursor, focused, width-2))
+		rowsOut = append(rowsOut, listRow(safeText(items[i].Name), i == list.cursor, focused, width-2))
 	}
+	body = append(rowsOut, body...)
 	f := frame{number: 2, tabs: []string{"Active", "Archived"}, tab: p.tab, footer: list.counter(len(items), rows), focused: focused}
 	return f.render(joinLines(body), width, height)
 }

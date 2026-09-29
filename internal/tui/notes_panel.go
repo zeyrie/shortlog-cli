@@ -25,6 +25,10 @@ type notesPanel struct {
 	lists   [2]scrollList
 	tab     int
 	rows    int // visible note rows, set by the workspace layout
+	// states and more describe each tab's source: whether it is loading or
+	// failed, and whether older notes remain on the server.
+	states [2]loadState
+	more   [2]bool
 }
 
 func (n notesPanel) items() []api.Note {
@@ -98,12 +102,17 @@ func (n notesPanel) tabs(width int) []string {
 	return []string{"Inbox", ansi.Truncate(safeText(n.current.Name), max(room, 4), "…") + marker}
 }
 
-func (n notesPanel) View(width, height int, focused bool) string {
+func (n notesPanel) View(width, height int, focused bool, spinner string) string {
 	items, list := n.items(), n.lists[n.tab]
 	rows := max(height-2, 1)
+	state := n.states[n.tab]
+	trailer := stateRows(state, len(items) > 0, spinner, "notes")
+	if len(items) > 0 && len(trailer) > 0 {
+		rows = max(rows-len(trailer), 1) // keep the trailing row on screen
+	}
 	list.clamp(len(items), rows)
 	var body []string
-	if len(items) == 0 {
+	if len(items) == 0 && len(trailer) == 0 {
 		empty := "No notes in the Inbox"
 		if n.tab == projectTab {
 			empty = "No notes in this project"
@@ -116,7 +125,14 @@ func (n notesPanel) View(width, height int, focused bool) string {
 		row := dimStyle.Render(note.CreatedAt.Local().Format("Jan 02")) + "  " + noteTitle(note.Content)
 		body = append(body, listRow(row, i == list.cursor, focused, width-2))
 	}
-	f := frame{number: 3, tabs: n.tabs(width), tab: n.tab, footer: list.counter(len(items), rows), focused: focused}
+	body = append(body, trailer...)
+	footer := list.counter(len(items), rows)
+	if n.more[n.tab] && footer == "" && len(items) > 0 {
+		footer = " more below "
+	} else if n.more[n.tab] && footer != "" {
+		footer = footer[:len(footer)-1] + "+ " // older notes remain to load
+	}
+	f := frame{number: 3, tabs: n.tabs(width), tab: n.tab, footer: footer, focused: focused}
 	return f.render(joinLines(body), width, height)
 }
 

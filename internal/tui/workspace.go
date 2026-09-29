@@ -24,18 +24,6 @@ const (
 // time: the panels, or the main panel once it has focus.
 const narrowWidth = 70
 
-// workspaceData is everything the workspace shows. It is static sample data
-// for now; the next step loads it from the API.
-type workspaceData struct {
-	account  api.Account
-	sessions []api.Session
-	server   string
-	active   []api.Project
-	archived []api.Project
-	inbox    []api.Note
-	notes    map[string][]api.Note // by project ID
-}
-
 // notePlace is a note together with where it lives, for the reader header.
 type notePlace struct {
 	api.Note
@@ -45,7 +33,13 @@ type notePlace struct {
 // workspaceModel is the signed-in screen, laid out like lazygit: stacked
 // panels on the left ([1] account, [2] projects, [3] notes) and the main
 // panel [0] on the right showing the selected note or the account page.
+//
+// It loads its own data through commands and reports to the root model the
+// way the sign-in screen does, through state the root reads after each
+// update: a pending status note, and whether the session has expired.
 type workspaceModel struct {
+	api           workspaceAPI
+	token         string // never rendered
 	keys          workspaceKeyMap
 	width, height int // the space above the footer
 	focus         focusArea
@@ -55,22 +49,44 @@ type workspaceModel struct {
 	projects projectsPanel
 	notes    notesPanel
 	reader   noteView
-	data     workspaceData
+
+	accountState  loadState
+	projectsState loadState
+	sets          map[string]noteSet // loaded notes by source; see inboxSource
+
+	note    *statusNote
+	expired bool // a request was refused with 401; the root signs out
 }
 
-func newWorkspace(data workspaceData) workspaceModel {
-	w := workspaceModel{keys: defaultWorkspaceKeys(), focus: focusNotes, back: focusNotes, reader: newNoteView(), data: data}
-	w.account = accountPanel{account: data.account, sessions: data.sessions, server: data.server}
-	w.projects.setProjects(data.active, data.archived)
-	w.notes.inbox = data.inbox
-	if p, ok := w.projects.selected(); ok {
-		// The project tab is ready from the start, but the Inbox shows first.
-		w.notes.showProject(p, data.notes[p.ID])
-		w.notes.tab = inboxTab
-	}
+func newWorkspace(client workspaceAPI, token, server string) workspaceModel {
+	w := workspaceModel{api: client, token: token, keys: defaultWorkspaceKeys(), focus: focusNotes, back: focusNotes, reader: newNoteView(), sets: map[string]noteSet{}}
+	w.account.server = server
 	w.setSize(80, 22)
-	w.syncReader()
 	return w
+}
+
+// start requests everything the workspace opens with: the account, the
+// projects, and the Inbox. A project's notes load when it is first selected.
+func (w *workspaceModel) start() tea.Cmd {
+	cmds := tea.Batch(w.loadAccount(), w.loadProjects(), w.loadNotes(inboxSource, ""))
+	w.syncNotes()
+	return cmds
+}
+
+// userName is the signed-in user's name once the account has loaded.
+func (w workspaceModel) userName() string { return w.account.account.Username }
+
+// loading reports whether any request is in flight.
+func (w workspaceModel) loading() bool {
+	if w.accountState.loading || w.projectsState.loading {
+		return true
+	}
+	for _, set := range w.sets {
+		if set.loading {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *workspaceModel) setSize(width, height int) {
@@ -106,6 +122,24 @@ func (w workspaceModel) columnHeights() (account, projects, notes int) {
 }
 
 func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case accountLoaded:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onAccountLoaded(msg), nil
+	case projectsLoaded:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onProjectsLoaded(msg)
+	case notesLoaded:
+		if msg.token != w.token {
+			return w, nil
+		}
+		w = w.onNotesLoaded(msg)
+		return w, w.loadMoreIfNear()
+	}
 	msg2, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		if w.focus == focusMain {
@@ -131,15 +165,17 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 		w.setFocus([]focusArea{focusAccount, focusProjects, focusNotes, focusMain}[w.focus])
 	case key.Matches(msg2, k.PrevPanel):
 		w.setFocus([]focusArea{focusNotes, focusMain, focusAccount, focusProjects}[w.focus])
+	case key.Matches(msg2, k.Refresh):
+		return w, w.refresh()
 	case key.Matches(msg2, k.Open) && w.focus != focusMain:
 		// Enter drills in: a project to its notes, a note or the account
 		// line to the main panel.
 		if w.focus == focusProjects {
-			w.showSelectedProject()
+			cmd := w.showSelectedProject()
 			w.setFocus(focusNotes)
-		} else {
-			w.setFocus(focusMain)
+			return w, cmd
 		}
+		w.setFocus(focusMain)
 	case key.Matches(msg2, k.Back) && w.focus == focusMain:
 		w.setFocus(w.back)
 	default:
@@ -157,11 +193,12 @@ func (w workspaceModel) updateFocused(msg tea.KeyPressMsg) (workspaceModel, tea.
 		before := w.projects.tab
 		w.projects, changed = w.projects.Update(msg, w.keys)
 		if changed || before != w.projects.tab {
-			w.showSelectedProject()
+			return w, w.showSelectedProject()
 		}
 	case focusNotes:
 		w.notes, _ = w.notes.Update(msg, w.keys)
 		w.syncReader()
+		return w, w.loadMoreIfNear()
 	case focusMain:
 		var cmd tea.Cmd
 		w.reader, cmd = w.reader.Update(msg)
@@ -180,12 +217,32 @@ func (w *workspaceModel) setFocus(f focusArea) {
 }
 
 // showSelectedProject points the notes panel's project tab at the project
-// highlighted in panel [2].
-func (w *workspaceModel) showSelectedProject() {
-	if p, ok := w.projects.selected(); ok {
-		w.notes.showProject(p, w.data.notes[p.ID])
+// highlighted in panel [2], loading its notes the first time.
+func (w *workspaceModel) showSelectedProject() tea.Cmd {
+	p, ok := w.projects.selected()
+	if !ok {
+		return nil
 	}
-	w.syncReader()
+	w.notes.showProject(p, w.sets[p.ID].notes)
+	var cmd tea.Cmd
+	if set := w.sets[p.ID]; !set.loaded && !set.loading {
+		cmd = w.loadNotes(p.ID, "")
+	}
+	w.syncNotes()
+	return cmd
+}
+
+// refresh reloads what the focused area shows.
+func (w *workspaceModel) refresh() tea.Cmd {
+	switch {
+	case w.focus == focusAccount, w.focus == focusMain && w.back == focusAccount:
+		return w.loadAccount()
+	case w.focus == focusProjects:
+		return w.loadProjects()
+	}
+	cmd := w.loadNotes(w.visibleSource(), "")
+	w.syncNotes()
+	return cmd
 }
 
 // syncReader shows the note selected in panel [3].
@@ -198,15 +255,17 @@ func (w *workspaceModel) syncReader() {
 	w.reader.show(notePlace{Note: note, place: place}, ok)
 }
 
-func (w workspaceModel) View() string {
+// View draws the workspace; spinner is the status bar's current frame, used
+// by panels that are loading.
+func (w workspaceModel) View(spinner string) string {
 	leftWidth, mainWidth := w.columnWidths()
 	accountHeight, projectsHeight, notesHeight := w.columnHeights()
 	left := lipgloss.JoinVertical(lipgloss.Left,
-		w.account.View(leftWidth, accountHeight, w.focus == focusAccount),
-		w.projects.View(leftWidth, projectsHeight, w.focus == focusProjects),
-		w.notes.View(leftWidth, notesHeight, w.focus == focusNotes),
+		w.account.View(leftWidth, accountHeight, w.focus == focusAccount, w.accountState, spinner),
+		w.projects.View(leftWidth, projectsHeight, w.focus == focusProjects, w.projectsState, spinner),
+		w.notes.View(leftWidth, notesHeight, w.focus == focusNotes, spinner),
 	)
-	main := w.mainView(mainWidth)
+	main := w.mainView(mainWidth, spinner)
 	if w.width < narrowWidth {
 		if w.focus == focusMain {
 			return main
@@ -218,10 +277,10 @@ func (w workspaceModel) View() string {
 
 // mainView is the account page while the account is in view, and otherwise
 // the note selected in panel [3].
-func (w workspaceModel) mainView(width int) string {
+func (w workspaceModel) mainView(width int, spinner string) string {
 	focused := w.focus == focusMain
 	if w.focus == focusAccount || (focused && w.back == focusAccount) {
-		return w.account.page(width, w.height, focused, time.Now())
+		return w.account.page(width, w.height, focused, w.accountState, spinner, time.Now())
 	}
 	return w.reader.View(width, w.height, focused)
 }
@@ -231,7 +290,7 @@ type workspaceKeyMap struct {
 	Up, Down, PageUp, PageDown                         key.Binding
 	PrevTab, NextTab, NextPanel, PrevPanel             key.Binding
 	FocusMain, FocusAccount, FocusProjects, FocusNotes key.Binding
-	Open, Back, Quit                                   key.Binding
+	Open, Back, Refresh, Quit                          key.Binding
 }
 
 func defaultWorkspaceKeys() workspaceKeyMap {
@@ -250,6 +309,7 @@ func defaultWorkspaceKeys() workspaceKeyMap {
 		FocusNotes:    bind("3", "notes", "3"),
 		Open:          bind("enter", "open", "enter"),
 		Back:          bind("esc", "back", "esc"),
+		Refresh:       bind("r", "refresh", "r"),
 		Quit:          bind("q", "quit", "q"),
 	}
 }
@@ -260,12 +320,12 @@ func (w workspaceModel) ShortHelp() []key.Binding {
 	panels := bind("0-3", "panels", "0", "1", "2", "3")
 	switch w.focus {
 	case focusProjects:
-		return []key.Binding{keySelect, bind("[/]", "active/archived", "[", "]"), bind("enter", "notes", "enter"), panels, k.Quit}
+		return []key.Binding{keySelect, bind("[/]", "active/archived", "[", "]"), bind("enter", "notes", "enter"), k.Refresh, panels, k.Quit}
 	case focusNotes:
 		tabs := bind("[/]", "inbox/project", "[", "]")
-		return []key.Binding{keySelect, tabs, bind("enter", "read", "enter"), panels, k.Quit}
+		return []key.Binding{keySelect, tabs, bind("enter", "read", "enter"), k.Refresh, panels, k.Quit}
 	case focusMain:
 		return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
 	}
-	return []key.Binding{bind("enter", "account page", "enter"), panels, k.NextPanel, k.Quit}
+	return []key.Binding{bind("enter", "account page", "enter"), k.Refresh, panels, k.Quit}
 }

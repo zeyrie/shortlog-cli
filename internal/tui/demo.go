@@ -1,16 +1,48 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"shortlog-cli/internal/api"
 )
 
-// demoData is sample content for the -demo flag and the workspace tests:
-// enough projects to scroll the projects panel, an archived tab, a long note
-// to scroll the reader, and a project with no notes.
-func demoData(now time.Time) workspaceData {
+// demoAPI serves sample content for the -demo flag and the workspace tests,
+// through the same interface the workspace uses for the real server: enough
+// projects to scroll the projects panel, an archived tab, a long note to
+// scroll the reader, and a project with no notes.
+type demoAPI struct {
+	account  api.Account
+	sessions []api.Session
+	active   []api.Project
+	archived []api.Project
+	inbox    []api.Note
+	notes    map[string][]api.Note // by project ID
+}
+
+func (d demoAPI) Me(context.Context, string) (api.Account, error) { return d.account, nil }
+func (d demoAPI) Sessions(context.Context, string) ([]api.Session, error) {
+	return d.sessions, nil
+}
+func (d demoAPI) Projects(context.Context, string) ([]api.Project, error) { return d.active, nil }
+func (d demoAPI) ArchivedProjects(context.Context, string) ([]api.Project, error) {
+	return d.archived, nil
+}
+func (d demoAPI) Inbox(context.Context, string) (api.NotesPage, error) {
+	return api.NotesPage{Items: d.inbox}, nil
+}
+func (d demoAPI) InboxPage(context.Context, string, string) (api.NotesPage, error) {
+	return api.NotesPage{}, nil
+}
+func (d demoAPI) ProjectNotes(_ context.Context, _, id string) (api.NotesPage, error) {
+	return api.NotesPage{Items: d.notes[id]}, nil
+}
+func (d demoAPI) ProjectNotesPage(context.Context, string, string, string) (api.NotesPage, error) {
+	return api.NotesPage{}, nil
+}
+
+func newDemoAPI(now time.Time) demoAPI {
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 	day := 24 * time.Hour
 	archived := ago(40 * day)
@@ -22,14 +54,13 @@ func demoData(now time.Time) workspaceData {
 	note := func(id, content string, age time.Duration) api.Note {
 		return api.Note{ID: id, Content: content, CreatedAt: ago(age)}
 	}
-	return workspaceData{
+	return demoAPI{
 		account: api.Account{ID: "demo", Username: "Ari", TimeZone: "Europe/London", CreatedAt: ago(200 * day)},
 		sessions: []api.Session{
 			{ID: "s1", DeviceLabel: "MacBook Pro", Current: true, LastUsedAt: now},
 			{ID: "s2", DeviceLabel: "iPhone", LastUsedAt: ago(2 * day)},
 			{ID: "s3", UserAgent: "shortlog-cli/linux", LastUsedAt: ago(35 * day)},
 		},
-		server:   "demo",
 		active:   active,
 		archived: []api.Project{{ID: "a1", Name: "Wedding planning", ArchivedAt: &archived}, {ID: "a2", Name: "Old job", ArchivedAt: &archived}},
 		inbox: []api.Note{

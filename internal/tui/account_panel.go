@@ -13,14 +13,21 @@ import (
 // Focusing it shows the account page in the main panel, which holds
 // everything about the account: profile, sessions, sign-out, and deletion.
 type accountPanel struct {
-	account  api.Account
-	sessions []api.Session
-	server   string
+	account     api.Account
+	sessions    []api.Session
+	sessionsErr string
+	server      string
 }
 
-func (a accountPanel) View(width, height int, focused bool) string {
+func (a accountPanel) View(width, height int, focused bool, state loadState, spinner string) string {
 	line := " " + titleStyle.Render(safeText(a.account.Username))
-	if a.server != "" {
+	switch {
+	case !state.loaded && state.loading:
+		line = " " + spinner + " " + dimStyle.Render("Loading account…")
+	case !state.loaded && state.err != "":
+		line = " " + errStyle.Render("✗ Not loaded") + dimStyle.Render(" · r to retry")
+	}
+	if a.server != "" && state.loaded {
 		line += dimStyle.Render(" · " + a.server)
 	}
 	return frame{number: 1, title: "Account", focused: focused}.render(line, width, height)
@@ -29,7 +36,14 @@ func (a accountPanel) View(width, height int, focused bool) string {
 // page is the account page shown in the main panel. For now it only shows the
 // account; editing, revoking sessions, and signing out arrive with the
 // account step of the workspace.
-func (a accountPanel) page(width, height int, focused bool, now time.Time) string {
+func (a accountPanel) page(width, height int, focused bool, state loadState, spinner string, now time.Time) string {
+	f := frame{number: 0, title: "Account", focused: focused}
+	switch {
+	case !state.loaded && state.loading:
+		return f.render(" "+spinner+" "+dimStyle.Render("Loading your account…"), width, height)
+	case !state.loaded && state.err != "":
+		return f.render(" "+errStyle.Render("✗ "+state.err)+"\n\n "+dimStyle.Render("Press r to retry."), width, height)
+	}
 	label := lipgloss.NewStyle().Width(14).Foreground(lipgloss.BrightBlack)
 	section := lipgloss.NewStyle().Bold(true)
 	var b strings.Builder
@@ -40,6 +54,9 @@ func (a accountPanel) page(width, height int, focused bool, now time.Time) strin
 		b.WriteString("  " + label.Render("Member since") + a.account.CreatedAt.Local().Format("Jan 2006") + "\n")
 	}
 	b.WriteString("\n " + section.Render("Sessions") + "\n")
+	if a.sessionsErr != "" {
+		b.WriteString("  " + errStyle.Render("✗ "+a.sessionsErr) + "\n")
+	}
 	for _, s := range a.sessions {
 		name := safeText(s.DeviceLabel)
 		if name == "" {
@@ -55,7 +72,7 @@ func (a accountPanel) page(width, height int, focused bool, now time.Time) strin
 	}
 	b.WriteString("\n " + section.Render("Sign out of this device") + "\n")
 	b.WriteString(" " + errStyle.Render("Delete account…"))
-	return frame{number: 0, title: "Account", focused: focused}.render(b.String(), width, height)
+	return f.render(b.String(), width, height)
 }
 
 // lastUsed says how long ago a session was used, in the coarsest unit that

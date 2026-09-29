@@ -13,6 +13,7 @@ import (
 )
 
 type fakeAPI struct {
+	projectNoteLoads     []string
 	telegramStart        api.TelegramStart
 	telegramStartErr     error
 	telegramPoll         []api.VerifyResult
@@ -126,10 +127,12 @@ type fakeStore struct {
 	token   string
 	saveErr error
 	deletes int
+	saves   int
 }
 
 func (s *fakeStore) Load() (string, error) { return s.token, nil }
 func (s *fakeStore) Save(token string) error {
+	s.saves++
 	if s.saveErr == nil {
 		s.token = token
 	}
@@ -264,7 +267,8 @@ func (f *fakeAPI) CreateProject(_ context.Context, _, name string) (api.Project,
 	f.projectList = append([]api.Project{project}, f.projectList...)
 	return project, nil
 }
-func (f *fakeAPI) ProjectNotes(_ context.Context, _, _ string) (api.NotesPage, error) {
+func (f *fakeAPI) ProjectNotes(_ context.Context, _, id string) (api.NotesPage, error) {
+	f.projectNoteLoads = append(f.projectNoteLoads, id)
 	return api.NotesPage{Items: f.projectNotes, NextCursor: f.projectNext}, f.inboxErr
 }
 func (f *fakeAPI) ProjectNotesPage(_ context.Context, _, _, cursor string) (api.NotesPage, error) {
@@ -321,17 +325,26 @@ func TestEmailProfileSignIn(t *testing.T) {
 	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, cmd = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != inboxStage || m.token != "secret-token" || f.name != "Ari" || f.zone != "Europe/London" {
+	if m.stage != workspaceStage || m.token != "secret-token" || f.name != "Ari" || f.zone != "Europe/London" {
 		t.Fatalf("sign-in: stage=%d, name=%q, zone=%q", m.stage, f.name, f.zone)
 	}
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if s.token != "secret-token" || m.busy || m.username != "Ari" {
-		t.Fatal("session and Inbox not loaded")
+	m = feed(m, cmd)
+	if s.token != "secret-token" || m.busy || m.workspace.loading() || m.workspace.userName() != "Ari" {
+		t.Fatal("session not saved or workspace not loaded")
 	}
 	if strings.Contains(m.View().Content, "secret-token") || strings.Contains(m.View().Content, "12345678") {
 		t.Fatal("secret appeared in screen")
 	}
+}
+
+// feed runs a command, including any it batches, and applies each result.
+// Commands those results return are not run, so a chain stops after one step.
+func feed(m Model, cmd tea.Cmd) Model {
+	for _, msg := range runCmd(cmd) {
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	}
+	return m
 }
 
 // runeKey is a key press that types r.
@@ -367,7 +380,7 @@ func TestRestoreNeedsExplicitConsent(t *testing.T) {
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if f.restores != 1 || m.stage != inboxStage || m.token != "restored-token" || m.login.ticket != "" {
+	if f.restores != 1 || m.stage != workspaceStage || m.token != "restored-token" || m.login.ticket != "" {
 		t.Fatal("restore did not finish securely")
 	}
 }
@@ -394,22 +407,18 @@ func TestSavedSessionAndReadInbox(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected validation request")
 	}
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.stage != inboxStage || len(m.notes) != 2 || m.token != "saved-token" {
-		t.Fatal("saved session did not open Inbox")
+	m = feed(m, cmd)
+	if m.stage != workspaceStage || len(m.workspace.notes.inbox) != 2 || m.token != "saved-token" || s.saves != 0 {
+		t.Fatal("saved session did not open the workspace with the Inbox, or was saved again")
 	}
 	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if m.selected != 1 {
-		t.Fatal("did not select second note")
-	}
 	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.stage != readingStage || !strings.Contains(m.View().Content, "second") {
-		t.Fatal("did not open note")
+	if m.workspace.focus != focusMain || !strings.Contains(m.View().Content, "second") {
+		t.Fatal("did not open the second note")
 	}
 	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
-	if m.stage != inboxStage {
-		t.Fatal("did not return to list")
+	if m.workspace.focus != focusNotes {
+		t.Fatal("did not return to the notes")
 	}
 }
 
@@ -418,10 +427,8 @@ func TestExpiredSessionRemoved(t *testing.T) {
 	s := &fakeStore{token: "expired-token"}
 	m := New(f, s)
 	next, cmd := m.Update(loadedSession{token: s.token})
-	m = next.(Model)
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.stage != loginStage || m.token != "" || s.token != "" || s.deletes != 1 {
+	m = feed(next.(Model), cmd)
+	if m.stage != loginStage || m.token != "" || s.token != "" || s.deletes != 1 || !strings.Contains(m.View().Content, "Session expired") {
 		t.Fatal("expired session not cleared")
 	}
 }
@@ -431,10 +438,8 @@ func TestNetworkErrorKeepsSavedSession(t *testing.T) {
 	s := &fakeStore{token: "saved-token"}
 	m := New(f, s)
 	next, cmd := m.Update(loadedSession{token: s.token})
-	m = next.(Model)
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.stage != inboxStage || s.token != "saved-token" || s.deletes != 0 || !strings.Contains(m.View().Content, "retry") {
+	m = feed(next.(Model), cmd)
+	if m.stage != workspaceStage || s.token != "saved-token" || s.deletes != 0 || !strings.Contains(m.View().Content, "retry") {
 		t.Fatal("network error lost session")
 	}
 }
@@ -513,11 +518,11 @@ func TestQuickCaptureUnauthorizedResumesAfterSignIn(t *testing.T) {
 	if m.stage != loginStage || !m.resumeDraft || m.draft.Value() != "Unsent note" || s.token != "" {
 		t.Fatal("expired session lost draft")
 	}
-	cmd = m.signedIn("new-token")
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.stage != captureStage || m.draft.Value() != "Unsent note" || m.resumeDraft {
-		t.Fatal("did not resume draft")
+	// Signing in now opens the workspace. The draft is kept for the capture
+	// popup, which takes over resuming it; the old editor is unreachable.
+	m = feed(m, m.signedIn("new-token"))
+	if m.stage != workspaceStage || m.draft.Value() != "Unsent note" || !m.resumeDraft {
+		t.Fatal("signing in again lost the unsent draft")
 	}
 }
 
@@ -1421,7 +1426,7 @@ func TestTelegramSignInAndNewProfile(t *testing.T) {
 	m, poll = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(poll())
 	m = next.(Model)
-	if m.stage != inboxStage || m.token != "telegram-token" || m.login.telegramSecret != "" || len(f.telegramPollCalls) != 3 || !strings.Contains(f.telegramPollCalls[2], "New User:UTC") {
+	if m.stage != workspaceStage || m.token != "telegram-token" || m.login.telegramSecret != "" || len(f.telegramPollCalls) != 3 || !strings.Contains(f.telegramPollCalls[2], "New User:UTC") {
 		t.Fatal("Telegram profile completion failed")
 	}
 }
@@ -1444,7 +1449,7 @@ func TestTelegramRestoreRequiresConsent(t *testing.T) {
 	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if f.telegramRestoreCalls != 1 || m.stage != inboxStage || m.token != "telegram-token" {
+	if f.telegramRestoreCalls != 1 || m.stage != workspaceStage || m.token != "telegram-token" {
 		t.Fatal("Telegram restore failed")
 	}
 }

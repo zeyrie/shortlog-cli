@@ -139,3 +139,20 @@ func listRow(text string, selected, focused bool, width int) string {
 	}
 	return "   " + text
 }
+
+// stateRows is what a list panel shows instead of, or after, its items while
+// loading or after a failure. With no items it fills the panel; with items it
+// is one trailing row, so what already loaded stays readable.
+func stateRows(state loadState, hasItems bool, spinner, what string) []string {
+	switch {
+	case state.loading && !hasItems:
+		return []string{" " + spinner + " " + dimStyle.Render("Loading "+what+"…")}
+	case state.err != "" && !hasItems:
+		return []string{" " + errStyle.Render("✗ Could not load "+what), "   " + dimStyle.Render("r to retry")}
+	case state.loading:
+		return []string{" " + spinner + " " + dimStyle.Render("Loading more…")}
+	case state.err != "":
+		return []string{" " + errStyle.Render("✗ ") + dimStyle.Render("Could not load more · r to retry")}
+	}
+	return nil
+}
