@@ -83,6 +83,43 @@ type loginModel struct {
 	token string // set when sign-in succeeds; the root takes it and resets the screen
 }
 
+// Results of the sign-in screen's requests.
+type startResult struct {
+	id  string
+	err error
+}
+
+type verifyResult struct {
+	result api.VerifyResult
+	err    error
+}
+
+type restoreResult struct {
+	token string
+	err   error
+}
+
+type telegramStartResult struct {
+	start api.TelegramStart
+	err   error
+}
+
+type telegramPollResult struct {
+	attempt string
+	result  api.VerifyResult
+	err     error
+}
+
+type telegramTick struct {
+	attempt    string
+	generation uint64
+}
+
+type telegramBrowserResult struct {
+	attempt string
+	err     error
+}
+
 // clipboardResult reports whether the system clipboard took a copy.
 type clipboardResult struct {
 	text string

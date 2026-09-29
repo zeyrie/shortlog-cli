@@ -68,11 +68,9 @@ func TestProjectNotesLoadOnceAndAreCached(t *testing.T) {
 	m, _ = press(m, runeKey('2'))
 	m, cmd := press(m, runeKey('j'))
 	m = settleAll(m, cmd)
-	m, cmd = press(m, runeKey('k'))
-	if cmd != nil {
+	if _, cmd = press(m, runeKey('k')); cmd != nil {
 		t.Fatal("returning to a loaded project requested its notes again")
 	}
-	m = feed(m, cmd)
 	if strings.Join(f.projectNoteLoads, ",") != "p1,p2" {
 		t.Fatalf("project note loads: %v", f.projectNoteLoads)
 	}
@@ -92,9 +90,9 @@ func TestNotesLoadOlderPagesNearTheEnd(t *testing.T) {
 	if len(f.requested) != 0 {
 		t.Fatal("older notes were requested before the cursor neared the end")
 	}
-	m, cmd := press(m, runeKey('j'))
 	m, _ = press(m, runeKey('j'))
-	m, cmd = press(m, runeKey('j'))
+	m, _ = press(m, runeKey('j'))
+	m, cmd := press(m, runeKey('j'))
 	if cmd == nil {
 		t.Fatal("nearing the end did not request older notes")
 	}

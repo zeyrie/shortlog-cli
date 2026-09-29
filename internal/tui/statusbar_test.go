@@ -110,7 +110,7 @@ func TestStatusLineFitsAndContextYields(t *testing.T) {
 }
 
 func TestFooterFitsEveryScreen(t *testing.T) {
-	for s := startupStage; s <= accountDeleteStage; s++ {
+	for s := startupStage; s <= workspaceStage; s++ {
 		for _, size := range []struct{ width, height int }{{80, 24}, {42, 16}, {20, 10}, {20, 6}} {
 			m := New(&fakeAPI{}, &fakeStore{})
 			m.stage, m.busy = s, false

@@ -5,32 +5,20 @@ import (
 	"charm.land/bubbles/v2/key"
 )
 
-// Footer shortcuts. Each binding pairs the keys with the hint the footer's
-// help line shows. Update still matches key strings; as screens become
-// components they switch to key.Matches on these same bindings.
+// bind makes a key binding: the keys it matches, and the hint the footer's
+// help line shows for it. Screens match keys with key.Matches against their
+// key maps, and list the same bindings in their ShortHelp.
 func bind(label, action string, keys ...string) key.Binding {
 	return key.NewBinding(key.WithKeys(keys...), key.WithHelp(label, action))
 }
 
-// noKey is the "n or Esc" answer shared by every confirmation prompt.
-func noKey(action string) key.Binding { return bind("n/esc", action, "n", "esc") }
-
 var (
-	keyQuit       = bind("q", "quit", "q")
-	keyForceQuit  = bind("ctrl+c", "quit", "ctrl+c")
-	keySelect     = bind("↑/↓", "select", "up", "down", "k", "j")
-	keyScroll     = bind("↑/↓", "scroll", "up", "down", "k", "j")
-	keyRefresh    = bind("r", "refresh", "r")
-	keyBack       = bind("esc", "back", "esc")
-	keyCancel     = bind("esc", "cancel", "esc")
-	keySessions   = bind("s", "sessions", "s")
-	keyAccount    = bind("g", "account", "g")
-	keyProjects   = bind("p", "projects", "p")
-	keyEditNote   = bind("e", "edit", "e")
-	keyMoveNote   = bind("v", "move", "v")
-	keyDeleteNote = bind("d", "delete", "d")
-	keyOlder      = bind("m", "older", "m")
-	keyTabSwitch  = bind("tab", "switch field", "tab", "shift+tab")
+	keyQuit      = bind("q", "quit", "q")
+	keyForceQuit = bind("ctrl+c", "quit", "ctrl+c")
+	keySelect    = bind("↑/↓", "select", "up", "down", "k", "j")
+	keyBack      = bind("esc", "back", "esc")
+	keyCancel    = bind("esc", "cancel", "esc")
+	keyTabSwitch = bind("tab", "switch field", "tab", "shift+tab")
 )
 
 // loginKeyMap is the sign-in screen's bindings. Update matches keys with
@@ -95,49 +83,10 @@ func newHelp() help.Model {
 // first: the help line drops trailing hints when the terminal is narrow.
 func (m Model) shortcuts() []key.Binding {
 	switch m.stage {
-	case startupStage:
-		return []key.Binding{keyForceQuit}
 	case loginStage:
 		return m.login.ShortHelp()
 	case workspaceStage:
 		return m.workspace.ShortHelp()
-	case inboxStage:
-		if m.archivedProject() {
-			return []key.Binding{bind("enter", "read", "enter"), keySelect, keyOlder, keyRefresh, keyProjects, keySessions, keyAccount, keyBack, keyQuit}
-		}
-		return []key.Binding{bind("enter", "read", "enter"), bind("n", "new", "n"), keyEditNote, keyMoveNote, keyDeleteNote, keySelect, keyProjects, keyRefresh, keyOlder, keySessions, keyAccount, keyQuit}
-	case readingStage:
-		if m.archivedProject() {
-			return []key.Binding{keyScroll, keyBack, keyQuit}
-		}
-		return []key.Binding{keyEditNote, keyMoveNote, keyDeleteNote, keyScroll, keyBack, keyQuit}
-	case captureStage:
-		return []key.Binding{bind("ctrl+s", "save", "ctrl+s"), bind("enter", "new line", "enter"), keyBack}
-	case discardStage, accountDiscardStage:
-		return []key.Binding{bind("y", "discard", "y"), noKey("keep editing")}
-	case deleteStage:
-		return []key.Binding{bind("y", "delete permanently", "y"), noKey("cancel")}
-	case projectsStage:
-		if m.showArchived {
-			return []key.Binding{bind("enter", "read-only", "enter"), bind("u", "unarchive", "u"), bind("t", "active", "t"), keySelect, bind("i", "inbox", "i"), keySessions, keyAccount, keyRefresh, bind("esc", "inbox", "esc"), keyQuit}
-		}
-		return []key.Binding{bind("enter", "open", "enter"), bind("a", "new", "a"), bind("x", "archive", "x"), bind("t", "archived", "t"), keySelect, bind("i", "inbox", "i"), keySessions, keyAccount, keyRefresh, bind("esc", "inbox", "esc"), keyQuit}
-	case newProjectStage:
-		return []key.Binding{bind("enter", "create", "enter"), keyCancel}
-	case moveStage:
-		return []key.Binding{bind("enter", "move", "enter"), keySelect, keyRefresh, keyCancel}
-	case archiveStage:
-		return []key.Binding{bind("y", "archive", "y"), noKey("cancel")}
-	case accountStage:
-		return []key.Binding{bind("e", "edit profile", "e"), bind("d", "request deletion", "d"), keyRefresh, keyBack}
-	case accountEditStage:
-		return []key.Binding{bind("enter", "save", "enter"), keyTabSwitch, keyBack}
-	case accountDeleteStage:
-		return []key.Binding{bind("enter", "request deletion", "enter"), keyCancel}
-	case sessionsStage:
-		return []key.Binding{bind("x", "revoke", "x"), bind("a", "revoke all", "a"), bind("l", "log out here", "l"), keySelect, keyRefresh, keyBack}
-	case sessionConfirmStage:
-		return []key.Binding{bind("y", "confirm", "y"), noKey("cancel")}
 	}
-	return nil
+	return []key.Binding{keyForceQuit}
 }

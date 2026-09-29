@@ -8,9 +8,11 @@ import (
 
 // Shared styles. setTheme rebuilds them when the terminal reports its
 // background colour; until then they assume a dark background, which most
-// terminals have. They are package-level because the screens that predate the
-// workspace redesign read them directly; the workspace will carry its styles
-// in the model instead.
+// terminals have. They are package-level so the small render helpers every
+// screen shares (panel frames, list rows, load states) can use them without a
+// styles value threaded through each call. Only the root model's Update calls
+// setTheme, on Bubble Tea's single update goroutine; tests that change the
+// theme restore it.
 var (
 	titleStyle    lipgloss.Style
 	dimStyle      lipgloss.Style

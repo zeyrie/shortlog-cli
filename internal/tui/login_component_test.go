@@ -200,8 +200,7 @@ func TestViewDeclaresTitleAndProgress(t *testing.T) {
 	if v := m.View(); v.ProgressBar == nil || v.ProgressBar.State != tea.ProgressBarIndeterminate {
 		t.Fatal("no progress indicator while Telegram sign-in starts")
 	}
-	m.stage, m.busy = inboxStage, false
-	if v := m.View(); v.WindowTitle != "Shortlog" || v.ProgressBar != nil {
-		t.Fatalf("inbox view: title %q", v.WindowTitle)
+	if v := NewDemo().View(); v.WindowTitle != "Shortlog" || v.ProgressBar != nil {
+		t.Fatalf("idle workspace view: title %q", v.WindowTitle)
 	}
 }
