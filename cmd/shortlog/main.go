@@ -13,7 +13,7 @@ import (
 	"shortlog-cli/internal/tui"
 )
 
-const defaultAPIURL = "http://127.0.0.1:8080"
+const defaultAPIURL = "https://shortlog.zeyrie.link"
 
 func main() {
 	address := flag.String("api-url", "", "Shortlog API origin for this run (default: the saved server, or "+defaultAPIURL+")")
