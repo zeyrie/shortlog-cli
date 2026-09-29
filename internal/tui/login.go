@@ -24,9 +24,6 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.stage = m.telegramBack
 		m.busy = false
 		m.message = "Telegram sign-in cancelled."
-		if m.stage == emailStage {
-			m.focusInput(emailInput)
-		}
 		return m, nil
 	}
 	if m.busy {
@@ -38,22 +35,22 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case emailStage:
 			m.stage = loginStage
-			m.inputs[emailInput].Blur()
+			m.loginForm = nil
 		case codeStage:
-			m.stage = emailStage
 			m.challenge = ""
-			m.focusInput(emailInput)
+			return m, m.showLoginForm(emailStage)
 		case profileStage:
 			if m.telegramLogin {
 				m.clearTelegram()
 				m.stage = loginStage
+				m.loginForm = nil
 			} else {
-				m.stage = codeStage
-				m.focusInput(codeInput)
+				return m, m.showLoginForm(codeStage)
 			}
 		case restoreStage:
 			m.clearTelegram()
 			m.stage = loginStage
+			m.loginForm = nil
 		}
 		m.message = ""
 		return m, nil
@@ -64,57 +61,6 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case emailStage:
 		if msg.String() == "ctrl+t" {
 			return m, m.startTelegram(emailStage)
-		}
-		if msg.String() == "enter" {
-			m.clearTelegram()
-			address := strings.TrimSpace(m.inputs[emailInput].Value())
-			if address == "" || !strings.Contains(address, "@") {
-				m.message = "Enter a valid email address."
-				return m, nil
-			}
-			m.email, m.busy, m.message = address, true, ""
-			return m, func() tea.Msg {
-				id, err := m.api.StartEmail(context.Background(), address)
-				return startResult{id, err}
-			}
-		}
-	case codeStage:
-		if msg.String() == "enter" {
-			code := m.inputs[codeInput].Value()
-			if !eightDigits(code) {
-				m.message = "Enter the 8-digit code from your email."
-				return m, nil
-			}
-			return m.verify(code, "", "")
-		}
-	case profileStage:
-		if msg.String() == "tab" || msg.String() == "shift+tab" {
-			if m.focus == usernameInput {
-				m.focusInput(zoneInput)
-			} else {
-				m.focusInput(usernameInput)
-			}
-			return m, nil
-		}
-		if msg.String() == "enter" {
-			name := strings.TrimSpace(m.inputs[usernameInput].Value())
-			zone := strings.TrimSpace(m.inputs[zoneInput].Value())
-			if name == "" || zone == "" {
-				m.message = "Both name and IANA time zone are required."
-				return m, nil
-			}
-			if zone == "Local" {
-				m.message = "Choose an IANA time zone, not Local."
-				return m, nil
-			}
-			if _, err := time.LoadLocation(zone); err != nil {
-				m.message = "Enter a valid IANA time zone (for example, Europe/London)."
-				return m, nil
-			}
-			if m.telegramLogin {
-				return m, m.pollTelegram(name, zone)
-			}
-			return m.verify(m.inputs[codeInput].Value(), name, zone)
 		}
 	case restoreStage:
 		switch strings.ToLower(msg.String()) {
@@ -147,9 +93,10 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.inputs[m.focus], cmd = m.inputs[m.focus].Update(msg)
-	return m, cmd
+	if m.stage == emailStage || m.stage == codeStage || m.stage == profileStage {
+		return m.updateLoginForm(msg)
+	}
+	return m, nil
 }
 
 func (m *Model) clearTelegram() {
@@ -162,10 +109,9 @@ func (m *Model) clearTelegram() {
 	m.ticket = ""
 }
 
-func (m *Model) openEmail() {
-	m.stage = emailStage
+func (m *Model) openEmail() tea.Cmd {
 	m.message = ""
-	m.focusInput(emailInput)
+	return m.showLoginForm(emailStage)
 }
 
 func (m *Model) startTelegram(back stage) tea.Cmd {
@@ -200,10 +146,13 @@ func (m *Model) pollTelegram(name, zone string) tea.Cmd {
 	}
 }
 
-func (m Model) verify(code, name, zone string) (tea.Model, tea.Cmd) {
-	m.busy, m.message = true, ""
-	return m, func() tea.Msg {
-		result, err := m.api.VerifyEmail(context.Background(), m.challenge, code, name, zone)
+// verify dispatches an email code check. Huh forms call it once the code
+// (and profile, for new accounts) validates.
+func (m *Model) verify(code, name, zone string) tea.Cmd {
+	m.busy, m.message = true, "Verifying sign-in…"
+	challenge := m.challenge
+	return func() tea.Msg {
+		result, err := m.api.VerifyEmail(context.Background(), challenge, code, name, zone)
 		return verifyResult{result, err}
 	}
 }
@@ -212,7 +161,8 @@ func (m *Model) signedIn(token string) tea.Cmd {
 	m.token = token
 	m.ticket = ""
 	m.challenge = ""
-	m.inputs[codeInput].SetValue("")
+	m.loginValues.code = ""
+	m.loginForm = nil
 	m.activeProject = nil
 	m.projects = nil
 	m.projectSelected = 0
@@ -264,13 +214,13 @@ func (m Model) updateLoginMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "1":
 		m.loginOptions.Select(0)
-		m.openEmail()
+		return m, m.openEmail()
 	case "2":
 		m.loginOptions.Select(1)
 		return m, m.startTelegram(loginStage)
 	case "enter":
 		if m.loginOptions.Index() == 0 {
-			m.openEmail()
+			return m, m.openEmail()
 		} else {
 			return m, m.startTelegram(loginStage)
 		}
@@ -281,5 +231,4 @@ func (m Model) updateLoginMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loginOptions, cmd = m.loginOptions.Update(msg)
 		return m, cmd
 	}
-	return m, nil
 }

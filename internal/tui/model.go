@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"shortlog-cli/internal/api"
 )
@@ -106,8 +107,10 @@ type Model struct {
 	api                emailAPI
 	store              sessionStore
 	stage              stage
-	inputs             [8]textinput.Model
+	inputs             [4]textinput.Model
 	focus              int
+	loginForm          *huh.Form
+	loginValues        *loginFormValues
 	challenge          string
 	ticket             string
 	telegramLogin      bool
@@ -163,11 +166,7 @@ type Model struct {
 }
 
 const (
-	emailInput = iota
-	codeInput
-	usernameInput
-	zoneInput
-	projectNameInput
+	projectNameInput = iota
 	accountNameInput
 	accountZoneInput
 	deletePhraseInput
@@ -175,6 +174,7 @@ const (
 
 func New(client emailAPI, store sessionStore) Model {
 	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14), openBrowser: openTelegramBrowser}
+	m.loginValues = &loginFormValues{}
 	m.loginOptions = newLoginOptions()
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
@@ -190,16 +190,6 @@ func New(client emailAPI, store sessionStore) Model {
 		m.inputs[i].CharLimit = 320
 		m.inputs[i].Width = 42
 	}
-	m.inputs[emailInput].Placeholder = "you@example.com"
-	m.inputs[emailInput].CharLimit = 320
-	m.inputs[codeInput].Placeholder = "8-digit code"
-	m.inputs[codeInput].CharLimit = 8
-	m.inputs[codeInput].EchoMode = textinput.EchoPassword
-	m.inputs[codeInput].EchoCharacter = '•'
-	m.inputs[usernameInput].Placeholder = "Your name"
-	m.inputs[usernameInput].CharLimit = 80
-	m.inputs[zoneInput].Placeholder = "e.g. Europe/London"
-	m.inputs[zoneInput].CharLimit = 64
 	m.inputs[projectNameInput].Placeholder = "Project name"
 	m.inputs[projectNameInput].CharLimit = 120
 	m.inputs[accountNameInput].Placeholder = "Your name"
@@ -210,9 +200,9 @@ func New(client emailAPI, store sessionStore) Model {
 	m.inputs[deletePhraseInput].CharLimit = 6
 	zone := time.Now().Location().String()
 	if zone != "Local" {
-		m.inputs[zoneInput].SetValue(zone)
+		m.loginValues.zone = zone
 	}
-	m.focusInput(emailInput)
+	m.focusInput(projectNameInput)
 	return m
 }
 
@@ -443,6 +433,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeReader()
 		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
+		if m.loginForm != nil {
+			m.loginForm.WithWidth(loginFormWidth(m.stage, m.width))
+			return m.updateLoginForm(msg)
+		}
 		return m, nil
 	case loadedSession:
 		return m.onLoadedSession(msg)
@@ -1451,6 +1445,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputs[m.focus], cmd = m.inputs[m.focus].Update(message)
 		return m, cmd
 	}
+	if !m.busy && (m.stage == emailStage || m.stage == codeStage || m.stage == profileStage) {
+		return m.updateLoginForm(message)
+	}
 	return m, nil
 }
 
@@ -1644,12 +1641,13 @@ func (m Model) View() string {
 	if m.stage == loginStage {
 		return m.loginView()
 	}
+	if isLoginStage(m.stage) {
+		return m.loginStepView()
+	}
 	var body string
 	switch m.stage {
 	case startupStage:
 		body = "Checking saved session…\n\n" + dimStyle.Render("Ctrl+C quit")
-	case emailStage, telegramStage, codeStage, profileStage, restoreStage:
-		body = m.loginBody()
 	case inboxStage:
 		body = m.listTitle()
 		if m.archivedProject() {

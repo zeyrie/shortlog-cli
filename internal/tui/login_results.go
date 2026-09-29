@@ -79,14 +79,13 @@ func (m Model) onTelegramPoll(msg telegramPollResult) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var apiErr *api.Error
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-			m.stage = profileStage
-			m.focusInput(usernameInput)
 			m.message = "New Telegram account: enter a name and IANA time zone."
-			return m, nil
+			return m, m.showLoginForm(profileStage)
 		}
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
 			if m.stage == profileStage {
 				m.message = "Server rejected the profile or attempt. Check your details; if expired, press Esc and start again."
+				return m, nil
 			} else {
 				m.message = "Telegram attempt expired or invalid. Press Esc then choose 2 to start again."
 			}
@@ -121,14 +120,12 @@ func (m Model) onEmailStart(msg startResult) (tea.Model, tea.Cmd) {
 	m.busy = false
 	if msg.err != nil {
 		m.message = friendlyError(msg.err, "Could not send a code.")
-	} else {
-		m.challenge = msg.id
-		m.stage = codeStage
-		m.inputs[codeInput].SetValue("")
-		m.focusInput(codeInput)
-		m.message = "Check your email. The code expires in 10 minutes."
+		return m, nil
 	}
-	return m, nil
+	m.challenge = msg.id
+	m.loginValues.code = ""
+	m.message = "Check your email. The code expires in 10 minutes."
+	return m, m.showLoginForm(codeStage)
 }
 
 func (m Model) onEmailVerify(msg verifyResult) (tea.Model, tea.Cmd) {
@@ -136,18 +133,17 @@ func (m Model) onEmailVerify(msg verifyResult) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var apiErr *api.Error
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-			m.stage = profileStage
-			m.focusInput(usernameInput)
 			m.message = "New account: enter a name and IANA time zone, then verify again."
-		} else {
-			m.message = friendlyError(msg.err, "Could not verify the code.")
+			return m, m.showLoginForm(profileStage)
 		}
+		// The code or profile form stays open with its values for a retry.
+		m.message = friendlyError(msg.err, "Could not verify the code.")
 		return m, nil
 	}
 	if msg.result.Status == "restore_required" {
 		m.stage = restoreStage
 		m.ticket = msg.result.RecoveryTicket
-		m.inputs[codeInput].SetValue("")
+		m.loginValues.code = ""
 		m.message = ""
 	} else {
 		return m, m.signedIn(msg.result.Token)

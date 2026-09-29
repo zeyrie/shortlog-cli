@@ -42,8 +42,8 @@ func TestLoginMenuSelectionAndNavigation(t *testing.T) {
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.stage != emailStage || !m.inputs[emailInput].Focused() {
-		t.Fatal("Enter did not open email input")
+	if m.stage != emailStage || m.loginForm == nil {
+		t.Fatal("Enter did not open the email form")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.stage != loginStage {

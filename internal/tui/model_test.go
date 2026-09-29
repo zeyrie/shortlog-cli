@@ -290,26 +290,33 @@ func TestEmailProfileSignIn(t *testing.T) {
 	f := &fakeAPI{}
 	s := &fakeStore{}
 	m := New(f, s)
-	m.stage, m.busy = emailStage, false
-	m.inputs[emailInput].SetValue("a@example.com")
+	m.stage, m.busy = loginStage, false
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || m.loginForm == nil {
+		t.Fatalf("email form did not open: stage=%d", m.stage)
+	}
+	m = typeText(m, "a@example.com")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if !m.busy || cmd == nil {
 		t.Fatal("expected async email start")
 	}
-	next, _ := m.Update(cmd())
+	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != codeStage || f.starts != 1 {
 		t.Fatalf("start: stage=%d, requests=%d", m.stage, f.starts)
 	}
-	m.inputs[codeInput].SetValue("12345678")
+	m = typeText(m, "12345678")
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != profileStage || m.inputs[codeInput].Value() != "12345678" {
+	if m.stage != profileStage || m.loginValues.code != "12345678" {
 		t.Fatal("expected profile form with code retained")
 	}
-	m.inputs[usernameInput].SetValue("Ari")
-	m.inputs[zoneInput].SetValue("Europe/London")
+	m = typeText(m, "Ari")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	m = typeText(m, "Europe/London")
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	next, cmd = m.Update(cmd())
 	m = next.(Model)
@@ -324,6 +331,15 @@ func TestEmailProfileSignIn(t *testing.T) {
 	if strings.Contains(m.View(), "secret-token") || strings.Contains(m.View(), "12345678") {
 		t.Fatal("secret appeared in screen")
 	}
+}
+
+// typeText feeds rune keys into the focused Huh form field.
+func typeText(m Model, text string) Model {
+	for _, r := range text {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	return m
 }
 
 func TestRestoreNeedsExplicitConsent(t *testing.T) {
@@ -355,9 +371,10 @@ func TestRestoreNeedsExplicitConsent(t *testing.T) {
 func TestInvalidCodeDoesNotCallAPI(t *testing.T) {
 	f := &fakeAPI{}
 	m := New(f, &fakeStore{})
-	m.stage = codeStage
-	m.busy = false
-	m.inputs[codeInput].SetValue("123")
+	m.stage, m.busy = codeStage, false
+	m.challenge = "challenge"
+	m.showLoginForm(codeStage)
+	m = typeText(m, "123")
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil || f.verifies != 0 || m.busy {
 		t.Fatal("invalid code sent to API")
@@ -1393,8 +1410,9 @@ func TestTelegramSignInAndNewProfile(t *testing.T) {
 		t.Fatal("new account profile not prompted")
 	}
 	f.telegramPollErr = nil
-	m.inputs[usernameInput].SetValue("New User")
-	m.inputs[zoneInput].SetValue("UTC")
+	m = typeText(m, "New User")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	m = typeText(m, "UTC")
 	m, poll = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	next, _ = m.Update(poll())
 	m = next.(Model)
