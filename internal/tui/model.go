@@ -10,12 +10,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"shortlog-cli/internal/api"
 )
@@ -158,7 +158,7 @@ const (
 )
 
 func New(client emailAPI, store sessionStore) Model {
-	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14)}
+	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(viewport.WithWidth(64), viewport.WithHeight(14))}
 	m.help = newHelp()
 	m.login = newLogin(client, openTelegramBrowser)
 	m.login.setSize(m.width, m.bodyHeight())
@@ -171,13 +171,15 @@ func New(client emailAPI, store sessionStore) Model {
 	m.draft.ShowLineNumbers = false
 	m.draft.Prompt = ""
 	// The default focused-line background is black in dark terminals.
-	m.draft.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	draftStyles := m.draft.Styles()
+	draftStyles.Focused.CursorLine = lipgloss.NewStyle()
+	m.draft.SetStyles(draftStyles)
 	m.draft.SetWidth(m.innerWidth())
 	m.draft.SetHeight(12)
 	for i := range m.inputs {
 		m.inputs[i] = textinput.New()
 		m.inputs[i].CharLimit = 320
-		m.inputs[i].Width = 42
+		m.inputs[i].SetWidth(42)
 	}
 	m.inputs[projectNameInput].Placeholder = "Project name"
 	m.inputs[projectNameInput].CharLimit = 120
@@ -192,7 +194,7 @@ func New(client emailAPI, store sessionStore) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, statusTick(), func() tea.Msg {
+	return tea.Batch(textinput.Blink, statusTick(), tea.RequestBackgroundColor, func() tea.Msg {
 		token, err := m.store.Load()
 		return loadedSession{token, err}
 	})
@@ -421,6 +423,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateLogin(msg)
 		}
 		return m, nil
+	case tea.BackgroundColorMsg:
+		// The terminal answered with its background: restyle for it. The
+		// sign-in screen keeps it for the Huh forms it builds later.
+		setTheme(msg.IsDark())
+		m.help = newHelp()
+		var cmd tea.Cmd
+		m.login, cmd = m.login.Update(msg)
+		return m, cmd
 	case statusBeat:
 		return m, m.status.beat(m.busy, time.Now())
 	case loadedSession:
@@ -848,7 +858,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.message = "Note moved to " + safeText(msg.destination.name) + "."
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		m.status.dismiss()
 		if msg.String() == "ctrl+c" {
 			if m.stage == captureStage && !m.busy && m.draft.Value() != m.editorStart {
@@ -1030,7 +1040,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.notes) > 0 {
 					m.stage = readingStage
 					m.resizeReader()
-					m.reader.SetContent(lipgloss.NewStyle().Width(m.reader.Width).Render(safeText(m.notes[m.selected].Content)))
+					m.reader.SetContent(lipgloss.NewStyle().Width(m.reader.Width()).Render(safeText(m.notes[m.selected].Content)))
 					m.reader.GotoTop()
 				}
 			}
@@ -1531,10 +1541,10 @@ func (m Model) footer() string {
 		return status
 	}
 	h := m.help
-	h.Width = max(1, m.width-2*statusGutter)
+	h.SetWidth(max(1, m.width-2*statusGutter))
 	// help drops trailing hints to fit, but when even its ellipsis would not
 	// fit it keeps the next hint anyway; cut the line so it never overflows.
-	line := ansi.Truncate(h.ShortHelpView(m.shortcuts()), h.Width, "…")
+	line := ansi.Truncate(h.ShortHelpView(m.shortcuts()), h.Width(), "…")
 	shortcuts := lipgloss.NewStyle().PaddingLeft(statusGutter).Render(line)
 	return shortcuts + "\n" + status
 }
@@ -1652,8 +1662,8 @@ func (m *Model) closeEditor(message string) {
 
 func (m *Model) resizeReader() {
 	width := m.innerWidth()
-	m.reader.Width = width
-	m.reader.Height = max(3, m.height-10)
+	m.reader.SetWidth(width)
+	m.reader.SetHeight(max(3, m.height-10))
 	if m.stage == readingStage && len(m.notes) > m.selected {
 		m.reader.SetContent(lipgloss.NewStyle().Width(width).Render(safeText(m.notes[m.selected].Content)))
 	}
@@ -1732,13 +1742,26 @@ func friendlyError(err error, fallback string) string {
 	return fallback + " Check your connection and try again."
 }
 
-var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-)
+// View declares the screen: its content and the full-screen alternate
+// buffer. Terminal features live here in Bubble Tea v2, not in options.
+func (m Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.WindowTitle = "Shortlog"
+	if m.stage == loginStage {
+		v.WindowTitle = "Shortlog · Sign in"
+	}
+	// Terminals that support it (such as Windows Terminal and Ghostty) show
+	// their own progress indicator in the tab while a request runs or while
+	// Telegram approval is pending; others ignore it.
+	if m.busy || (m.stage == loginStage && m.login.step == telegramStep) {
+		v.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
+	}
+	return v
+}
 
-func (m Model) View() string {
+// render draws the current screen.
+func (m Model) render() string {
 	if m.stage == loginStage {
 		return m.login.View(m.message, m.status.spinner()) + "\n" + m.footer()
 	}

@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
 )
 
 // Footer shortcuts. Each binding pairs the keys with the hint the footer's
@@ -38,7 +38,7 @@ var (
 type loginKeyMap struct {
 	ChooseEmail, ChooseTelegram, Continue, Select, Quit key.Binding
 	Next, PrevField, UseTelegram, Back                  key.Binding
-	Check, Reopen, Cancel                               key.Binding
+	Check, Reopen, Copy, Cancel                         key.Binding
 	Restore, Decline                                    key.Binding
 }
 
@@ -55,6 +55,7 @@ func defaultLoginKeys() loginKeyMap {
 		Back:           keyBack,
 		Check:          bind("r", "check now", "r"),
 		Reopen:         bind("o", "reopen browser", "o"),
+		Copy:           bind("c", "copy link", "c"),
 		Cancel:         keyCancel,
 		Restore:        bind("y", "restore", "y", "Y"),
 		Decline:        bind("n", "cancel", "n", "N"),
@@ -74,7 +75,7 @@ func (l loginModel) ShortHelp() []key.Binding {
 	case profileStep:
 		return []key.Binding{bind("enter", "next/save", "enter"), keyTabSwitch, k.Back}
 	case telegramStep:
-		return []key.Binding{k.Check, k.Reopen, k.Cancel}
+		return []key.Binding{k.Check, k.Reopen, k.Copy, k.Cancel}
 	case restoreStep:
 		return []key.Binding{k.Restore, bind("n", "keep deletion", "n"), bind("esc", "sign-in options", "esc")}
 	}

@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+	"github.com/atotto/clipboard"
 	"shortlog-cli/internal/api"
 )
 
@@ -71,12 +73,24 @@ type loginModel struct {
 	telegramGeneration    uint64
 	telegramBack          loginStep
 
+	// background is the terminal's reported background, replayed into each
+	// new Huh form so it styles itself for it.
+	background *tea.BackgroundColorMsg
+	// copyText writes to the system clipboard; tests replace it.
+	copyText func(string) error
+
 	note  *statusNote
 	token string // set when sign-in succeeds; the root takes it and resets the screen
 }
 
+// clipboardResult reports whether the system clipboard took a copy.
+type clipboardResult struct {
+	text string
+	err  error
+}
+
 func newLogin(client loginAPI, openBrowser func(string) error) loginModel {
-	l := loginModel{api: client, openBrowser: openBrowser, keys: defaultLoginKeys(), values: &loginFormValues{}, options: newLoginOptions()}
+	l := loginModel{api: client, openBrowser: openBrowser, copyText: clipboard.WriteAll, keys: defaultLoginKeys(), values: &loginFormValues{}, options: newLoginOptions()}
 	if zone := time.Now().Location().String(); zone != "Local" {
 		l.values.zone = zone
 	}
@@ -87,6 +101,7 @@ func newLogin(client loginAPI, openBrowser func(string) error) loginModel {
 // the screen size and the highlighted provider.
 func (l loginModel) reset() loginModel {
 	fresh := newLogin(l.api, l.openBrowser)
+	fresh.copyText, fresh.background = l.copyText, l.background
 	fresh.options.Select(l.options.Index())
 	fresh.setSize(l.width, l.height)
 	return fresh
@@ -128,7 +143,21 @@ func (l loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 		return l.onTelegramTick(msg)
 	case telegramPollResult:
 		return l.onTelegramPoll(msg)
-	case tea.KeyMsg:
+	case clipboardResult:
+		return l.onClipboard(msg)
+	case tea.BackgroundColorMsg:
+		l.background = &msg
+		if l.form != nil {
+			return l.updateForm(msg)
+		}
+		return l, nil
+	case tea.PasteMsg:
+		if l.busy || !l.hasForm() {
+			return l, nil
+		}
+		msg.Content = cleanPaste(l.step, msg.Content)
+		return l.updateForm(msg)
+	case tea.KeyPressMsg:
 		return l.updateKey(msg)
 	}
 	if !l.busy && l.hasForm() {
@@ -141,7 +170,7 @@ func (l loginModel) hasForm() bool {
 	return l.form != nil && (l.step == emailStep || l.step == codeStep || l.step == profileStep)
 }
 
-func (l loginModel) updateKey(msg tea.KeyMsg) (loginModel, tea.Cmd) {
+func (l loginModel) updateKey(msg tea.KeyPressMsg) (loginModel, tea.Cmd) {
 	if l.step == telegramStep && key.Matches(msg, l.keys.Cancel) {
 		l.clearTelegram()
 		l.step, l.busy = l.telegramBack, false
@@ -178,6 +207,9 @@ func (l loginModel) updateKey(msg tea.KeyMsg) (loginModel, tea.Cmd) {
 		case key.Matches(msg, l.keys.Reopen):
 			id, address, opener := l.telegramAttempt, l.telegramURL, l.openBrowser
 			return l, func() tea.Msg { return telegramBrowserResult{id, opener(address)} }
+		case key.Matches(msg, l.keys.Copy):
+			address, write := l.telegramURL, l.copyText
+			return l, func() tea.Msg { return clipboardResult{address, write(address)} }
 		}
 		return l, nil
 	}
@@ -206,7 +238,7 @@ func (l loginModel) back() (loginModel, tea.Cmd) {
 	return l, nil
 }
 
-func (l loginModel) updateMenu(msg tea.KeyMsg) (loginModel, tea.Cmd) {
+func (l loginModel) updateMenu(msg tea.KeyPressMsg) (loginModel, tea.Cmd) {
 	switch {
 	case key.Matches(msg, l.keys.ChooseEmail):
 		l.options.Select(0)
@@ -323,6 +355,33 @@ func (l loginModel) cardLoading() bool {
 		return l.busy
 	}
 	return false
+}
+
+// onClipboard confirms a copy. Without a system clipboard (for example over
+// SSH), it asks the terminal to copy instead (OSC 52), which most modern
+// terminals honour; there is no reply, so the message says so.
+func (l loginModel) onClipboard(msg clipboardResult) (loginModel, tea.Cmd) {
+	if msg.err == nil {
+		l.setStatus(statusInfo, "Link copied to the clipboard.")
+		return l, nil
+	}
+	l.setStatus(statusInfo, "Asked your terminal to copy the link.")
+	return l, tea.SetClipboard(msg.text)
+}
+
+// cleanPaste tidies text pasted into a sign-in field: codes are often pasted
+// as "1234 5678" or "1234-5678", so the code field keeps only digits; other
+// fields drop the surrounding whitespace and line breaks a copy picks up.
+func cleanPaste(step loginStep, text string) string {
+	if step == codeStep {
+		return strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, text)
+	}
+	return strings.Join(strings.Fields(text), " ")
 }
 
 type loginOption struct{ label string }

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"shortlog-cli/internal/api"
 )
 
@@ -16,40 +16,40 @@ func TestLoginMenuSelectionAndNavigation(t *testing.T) {
 	m := New(f, &fakeStore{})
 	next, _ := m.Update(loadedSession{})
 	m = next.(Model)
-	if m.stage != loginStage || !strings.Contains(m.View(), "1  Continue with email") {
+	if m.stage != loginStage || !strings.Contains(stripStatusANSI.ReplaceAllString(m.View().Content, ""), "1  Continue with email") {
 		t.Fatal("empty credential did not open login menu")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.login.options.Index() != 1 {
 		t.Fatal("arrow did not select Telegram")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = press(m, runeKey('k'))
 	if m.login.options.Index() != 0 {
 		t.Fatal("k did not move selection up")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = press(m, runeKey('j'))
 	if m.login.options.Index() != 1 {
 		t.Fatal("j did not move selection down")
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.busy || cmd == nil {
 		t.Fatal("Enter did not start Telegram")
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.login.step != menuStep || !strings.Contains(m.View(), "Could not start Telegram") {
+	if m.login.step != menuStep || !strings.Contains(m.View().Content, "Could not start Telegram") {
 		t.Fatal("failed start did not return to menu")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.login.step != emailStep || m.login.form == nil {
 		t.Fatal("Enter did not open the email form")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.login.step != menuStep {
 		t.Fatal("Esc did not return to login options")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m, _ = press(m, runeKey('1'))
 	if m.login.step != emailStep || m.login.options.Index() != 0 {
 		t.Fatal("1 did not open email directly")
 	}
@@ -60,7 +60,7 @@ func TestLoginDirectTelegramAndCancel(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy = loginStage, false
 	m.login.openBrowser = func(string) error { return nil }
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m, cmd := press(m, runeKey('2'))
 	if cmd == nil || m.login.options.Index() != 1 || !m.busy {
 		t.Fatal("2 did not start Telegram directly")
 	}
@@ -69,7 +69,7 @@ func TestLoginDirectTelegramAndCancel(t *testing.T) {
 	if m.login.step != telegramStep {
 		t.Fatal("Telegram approval not opened")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.login.step != menuStep || m.login.telegramSecret != "" || m.login.options.Index() != 1 {
 		t.Fatal("Telegram cancel did not return to menu")
 	}
@@ -93,7 +93,7 @@ func TestLoginLogoResponsiveAndCentered(t *testing.T) {
 	} {
 		m.width, m.height = size.width, size.height
 		m.login.setSize(m.width, m.bodyHeight())
-		view := stripANSI.ReplaceAllString(m.View(), "")
+		view := stripANSI.ReplaceAllString(m.View().Content, "")
 		for _, row := range strings.Split(size.logo, "\n") {
 			if !strings.Contains(view, strings.TrimRight(row, " ")) {
 				t.Errorf("%dx%d: wrong logo size", size.width, size.height)
@@ -111,7 +111,7 @@ func TestLoginLogoResponsiveAndCentered(t *testing.T) {
 	}
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = sized.(Model)
-	view := stripANSI.ReplaceAllString(m.View(), "")
+	view := stripANSI.ReplaceAllString(m.View().Content, "")
 	first := strings.Index(view, strings.Split(large, "\n")[0])
 	if first < 0 || strings.Count(view[:first], "\n") < 2 {
 		t.Fatal("logo is not vertically centered")
@@ -131,7 +131,7 @@ func TestLoginSmallTerminalWithStatus(t *testing.T) {
 		m.width, m.height = size.width, size.height
 		m.message = "Telegram sign-in unavailable. Configure Telegram on the server or use email."
 		m.login.setSize(m.width, m.bodyHeight())
-		view := m.View()
+		view := m.View().Content
 		if lipgloss.Height(view) != m.height {
 			t.Errorf("%dx%d: login screen exceeds terminal height: %d", m.width, m.height, lipgloss.Height(view))
 		}
@@ -153,7 +153,7 @@ func TestLoginOptionsAlignedAtBothSelections(t *testing.T) {
 		m.login.setSize(m.width, m.bodyHeight())
 		for selected := 0; selected < 2; selected++ {
 			m.login.options.Select(selected)
-			rows := strings.Split(stripANSI.ReplaceAllString(m.View(), ""), "\n")
+			rows := strings.Split(stripANSI.ReplaceAllString(m.View().Content, ""), "\n")
 			var columns []int
 			emailRow, telegramRow := -1, -1
 			for rowIndex, row := range rows {
@@ -196,17 +196,17 @@ func TestFailedEmailRequestKeepsFormEditable(t *testing.T) {
 	m.stage, m.busy = loginStage, false
 	m.login.showForm(emailStep)
 	m = typeText(m, "a@example.co")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.busy || !strings.Contains(m.View(), "a@example.co") {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.busy || !strings.Contains(m.View().Content, "a@example.co") {
 		t.Fatal("submitted entry hidden while the request runs")
 	}
 	next, _ := m.Update(startResult{"", errors.New("offline")})
 	m = next.(Model)
 	m = typeText(m, "m")
-	if m.login.step != emailStep || m.login.values.email != "a@example.com" || !strings.Contains(m.View(), "a@example.com") {
+	if m.login.step != emailStep || m.login.values.email != "a@example.com" || !strings.Contains(m.View().Content, "a@example.com") {
 		t.Fatalf("entry not editable after failure: stage %d, value %q", m.stage, m.login.values.email)
 	}
-	if m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter}); !m.busy || cmd == nil {
+	if m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter}); !m.busy || cmd == nil {
 		t.Fatal("corrected entry was not resubmitted")
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestLoginStepsShareCenteredLandingLayout(t *testing.T) {
@@ -20,10 +20,10 @@ func TestLoginStepsShareCenteredLandingLayout(t *testing.T) {
 	email.login.setSize(email.width, email.bodyHeight())
 	email.login.showForm(emailStep)
 
-	if column(landing.View(), "Continue with email") == 0 || column(email.View(), "Email address") == 0 {
+	if column(landing.View().Content, "Continue with email") == 0 || column(email.View().Content, "Email address") == 0 {
 		t.Fatal("expected both screens to render their content")
 	}
-	for name, view := range map[string]string{"landing": stripANSI.ReplaceAllString(landing.View(), ""), "email": stripANSI.ReplaceAllString(email.View(), "")} {
+	for name, view := range map[string]string{"landing": stripANSI.ReplaceAllString(landing.View().Content, ""), "email": stripANSI.ReplaceAllString(email.View().Content, "")} {
 		body := withoutFooter(view, landing.footerHeight())
 		if height := lipgloss.Height(view); height != 24 {
 			t.Errorf("%s: height %d, want 24", name, height)
@@ -106,7 +106,7 @@ func TestLoginStepsFitShortTerminals(t *testing.T) {
 		m.login.setSize(m.width, m.bodyHeight())
 		m.login.showForm(emailStep)
 		m.message = "Could not send a code. Check your connection and try again."
-		view := m.View()
+		view := m.View().Content
 		if height := lipgloss.Height(view); height != m.height {
 			t.Errorf("%dx%d: height %d", m.width, m.height, height)
 		}
@@ -125,9 +125,9 @@ func TestLoginFormCardIsStable(t *testing.T) {
 		m.stage, m.busy = loginStage, false
 		m.width, m.height = size.width, size.height
 		m.login.setSize(m.width, m.bodyHeight())
-		logoRow := row(stripANSI.ReplaceAllString(m.View(), ""), "A quiet place")
+		logoRow := row(stripANSI.ReplaceAllString(m.View().Content, ""), "A quiet place")
 		m.login.showForm(emailStep)
-		view := stripANSI.ReplaceAllString(m.View(), "")
+		view := stripANSI.ReplaceAllString(m.View().Content, "")
 		left, right := card(view)
 		if left < 0 {
 			t.Fatalf("%dx%d: no card: %q", m.width, m.height, view)
@@ -143,15 +143,15 @@ func TestLoginFormCardIsStable(t *testing.T) {
 		// Typing, loading, and the next step must not move or resize the card,
 		// nor move the header away from where the welcome screen put it.
 		m = typeText(m, "a.very.long.address.for.testing@example")
-		typed := stripANSI.ReplaceAllString(m.View(), "")
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
-		loading := stripANSI.ReplaceAllString(m.View(), "")
+		typed := stripANSI.ReplaceAllString(m.View().Content, "")
+		m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		loading := stripANSI.ReplaceAllString(m.View().Content, "")
 		if !strings.Contains(loading, "Sending a code") {
 			t.Errorf("%dx%d: no loader while sending: %q", m.width, m.height, loading)
 		}
 		next, _ := m.Update(cmd())
 		m = next.(Model)
-		code := stripANSI.ReplaceAllString(m.View(), "")
+		code := stripANSI.ReplaceAllString(m.View().Content, "")
 		for name, v := range map[string]string{"typed": typed, "loading": loading, "code": code} {
 			if l, r := card(v); l != left || r != right {
 				t.Errorf("%dx%d %s: card moved from %d–%d to %d–%d", m.width, m.height, name, left, right, l, r)
@@ -221,7 +221,7 @@ func TestLoginFormResizesWithTerminal(t *testing.T) {
 	m.login.showForm(emailStep)
 	resized, _ := m.Update(tea.WindowSizeMsg{Width: 24, Height: 20})
 	m = resized.(Model)
-	for _, line := range strings.Split(m.View(), "\n") {
+	for _, line := range strings.Split(m.View().Content, "\n") {
 		if lipgloss.Width(line) > 24 {
 			t.Errorf("resized terminal overflow: %q", line)
 		}

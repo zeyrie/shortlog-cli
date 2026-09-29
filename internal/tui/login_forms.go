@@ -9,10 +9,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // loginFormValues backs the Huh form fields for the email and Telegram paths.
@@ -84,27 +84,31 @@ func loginFormWidth(termWidth int, boxed bool) int {
 	return loginFieldWidth(termWidth, boxed)
 }
 
-func loginTheme(boxed bool) *huh.Theme {
-	theme := huh.ThemeBase()
-	theme.Focused.Title = titleStyle
-	theme.Focused.ErrorMessage = errStyle
-	theme.Focused.ErrorIndicator = errStyle
-	theme.Focused.TextInput.Prompt = menuRailStyle
-	theme.Focused.TextInput.Cursor = menuRailStyle
-	theme.Focused.TextInput.Placeholder = dimStyle
-	theme.Blurred.TextInput.Placeholder = dimStyle
-	theme.Blurred.Title = dimStyle
-	theme.Blurred.TextInput.Prompt = dimStyle
-	if boxed {
-		// The card is drawn around the whole form by the view. Huh sizes its
-		// group viewport for unframed fields, so a border on each field would
-		// be clipped; the fields themselves stay plain.
-		theme.Focused.Base = lipgloss.NewStyle()
-		theme.Blurred.Base = lipgloss.NewStyle()
-	} else {
-		theme.Focused.Base = theme.Focused.Base.BorderForeground(lipgloss.Color("6"))
-	}
-	return theme
+// loginTheme styles the sign-in fields. Huh calls it with whether the
+// terminal background is dark, once the form learns it.
+func loginTheme(boxed bool) huh.Theme {
+	return huh.ThemeFunc(func(isDark bool) *huh.Styles {
+		theme := huh.ThemeBase(isDark)
+		theme.Focused.Title = titleStyle
+		theme.Focused.ErrorMessage = errStyle
+		theme.Focused.ErrorIndicator = errStyle
+		theme.Focused.TextInput.Prompt = menuRailStyle
+		theme.Focused.TextInput.Cursor = menuRailStyle
+		theme.Focused.TextInput.Placeholder = dimStyle
+		theme.Blurred.TextInput.Placeholder = dimStyle
+		theme.Blurred.Title = dimStyle
+		theme.Blurred.TextInput.Prompt = dimStyle
+		if boxed {
+			// The card is drawn around the whole form by the view. Huh sizes
+			// its group viewport for unframed fields, so a border on each
+			// field would be clipped; the fields themselves stay plain.
+			theme.Focused.Base = lipgloss.NewStyle()
+			theme.Blurred.Base = lipgloss.NewStyle()
+		} else {
+			theme.Focused.Base = theme.Focused.Base.BorderForeground(accentColor)
+		}
+		return theme
+	})
 }
 
 // resizeForm refits the open form after a resize, switching between the
@@ -137,7 +141,11 @@ func (l *loginModel) showForm(step loginStep) tea.Cmd {
 		return nil
 	}
 	l.form = huh.NewForm(huh.NewGroup(fields...)).WithTheme(loginTheme(boxed)).WithShowHelp(false).WithWidth(loginFormWidth(l.width, boxed))
-	return l.form.Init()
+	init := l.form.Init()
+	if l.background != nil {
+		l.form.Update(*l.background) // a new form has not seen the terminal's reply
+	}
+	return init
 }
 
 func (l loginModel) fieldKeys() []string {
@@ -158,7 +166,7 @@ func (l loginModel) updateForm(msg tea.Msg) (loginModel, tea.Cmd) {
 	if l.form == nil {
 		return l, nil
 	}
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		switch {
 		case key.Matches(msg, l.keys.Next):
 			// Huh answers Enter with its own advance command; drop it and

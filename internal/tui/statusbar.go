@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -35,10 +35,7 @@ const (
 	statusFallback = "Working…"
 )
 
-var (
-	warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	spinnerFrames = spinner.MiniDot.Frames
-)
+var spinnerFrames = spinner.MiniDot.Frames
 
 type statusEntry struct {
 	level statusLevel

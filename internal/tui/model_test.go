@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"shortlog-cli/internal/api"
 )
 
@@ -281,7 +281,7 @@ func (f *fakeAPI) CreateProjectNote(_ context.Context, _, _, content string) (ap
 	return note, nil
 }
 
-func press(m Model, key tea.KeyMsg) (Model, tea.Cmd) {
+func press(m Model, key tea.KeyPressMsg) (Model, tea.Cmd) {
 	next, cmd := m.Update(key)
 	return next.(Model), cmd
 }
@@ -291,14 +291,14 @@ func TestEmailProfileSignIn(t *testing.T) {
 	s := &fakeStore{}
 	m := New(f, s)
 	m.stage, m.busy = loginStage, false
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if m.login.step != emailStep || m.login.form == nil {
 		t.Fatalf("email form did not open: stage=%d", m.stage)
 	}
 	m = typeText(m, "a@example.com")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.busy || cmd == nil {
 		t.Fatal("expected async email start")
 	}
@@ -309,16 +309,16 @@ func TestEmailProfileSignIn(t *testing.T) {
 	}
 	m = typeText(m, "12345678")
 	m.login.values.zone = "" // start the profile form empty whatever the machine's TZ
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.login.step != profileStep || m.login.values.code != "12345678" {
 		t.Fatal("expected profile form with code retained")
 	}
 	m = typeText(m, "Ari")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	m = typeText(m, "Europe/London")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, cmd = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != inboxStage || m.token != "secret-token" || f.name != "Ari" || f.zone != "Europe/London" {
@@ -329,15 +329,18 @@ func TestEmailProfileSignIn(t *testing.T) {
 	if s.token != "secret-token" || m.busy || m.username != "Ari" {
 		t.Fatal("session and Inbox not loaded")
 	}
-	if strings.Contains(m.View(), "secret-token") || strings.Contains(m.View(), "12345678") {
+	if strings.Contains(m.View().Content, "secret-token") || strings.Contains(m.View().Content, "12345678") {
 		t.Fatal("secret appeared in screen")
 	}
 }
 
+// runeKey is a key press that types r.
+func runeKey(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Text: string(r)} }
+
 // typeText feeds rune keys into the focused Huh form field.
 func typeText(m Model, text string) Model {
 	for _, r := range text {
-		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next, _ := m.Update(runeKey(r))
 		m = next.(Model)
 	}
 	return m
@@ -349,16 +352,16 @@ func TestRestoreNeedsExplicitConsent(t *testing.T) {
 	m.stage, m.busy = loginStage, false
 	next, _ := m.Update(verifyResult{result: api.VerifyResult{Status: "restore_required", RecoveryTicket: "secret-ticket"}})
 	m = next.(Model)
-	if m.login.step != restoreStep || strings.Contains(m.View(), "secret-ticket") {
+	if m.login.step != restoreStep || strings.Contains(m.View().Content, "secret-ticket") {
 		t.Fatal("expected restoration confirmation without ticket exposure")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if f.restores != 0 || m.login.ticket != "" || m.login.step != menuStep {
 		t.Fatal("decline must not restore")
 	}
 	next, _ = m.Update(verifyResult{result: api.VerifyResult{Status: "restore_required", RecoveryTicket: "secret-ticket"}})
 	m = next.(Model)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, cmd := press(m, runeKey('y'))
 	if cmd == nil || f.restores != 0 {
 		t.Fatal("restore should be asynchronous after consent")
 	}
@@ -376,7 +379,7 @@ func TestInvalidCodeDoesNotCallAPI(t *testing.T) {
 	m.login.challenge = "challenge"
 	m.login.showForm(codeStep)
 	m = typeText(m, "123")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil || f.verifies != 0 || m.busy {
 		t.Fatal("invalid code sent to API")
 	}
@@ -396,15 +399,15 @@ func TestSavedSessionAndReadInbox(t *testing.T) {
 	if m.stage != inboxStage || len(m.notes) != 2 || m.token != "saved-token" {
 		t.Fatal("saved session did not open Inbox")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.selected != 1 {
 		t.Fatal("did not select second note")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.stage != readingStage || !strings.Contains(m.View(), "second") {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.stage != readingStage || !strings.Contains(m.View().Content, "second") {
 		t.Fatal("did not open note")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != inboxStage {
 		t.Fatal("did not return to list")
 	}
@@ -431,7 +434,7 @@ func TestNetworkErrorKeepsSavedSession(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != inboxStage || s.token != "saved-token" || s.deletes != 0 || !strings.Contains(m.View(), "retry") {
+	if m.stage != inboxStage || s.token != "saved-token" || s.deletes != 0 || !strings.Contains(m.View().Content, "retry") {
 		t.Fatal("network error lost session")
 	}
 }
@@ -446,16 +449,16 @@ func TestQuickCaptureAndRefresh(t *testing.T) {
 	f := &fakeAPI{notes: []api.Note{{ID: "older", Content: "older", CreatedAt: time.Now()}}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, cmd := press(m, runeKey('n'))
 	if m.stage != captureStage || cmd == nil {
 		t.Fatal("n did not open quick capture")
 	}
 	m.draft.SetValue("first line\nsecond line")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !strings.Contains(m.draft.Value(), "second line\n") {
 		t.Fatal("Enter did not insert a newline")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if !m.busy || cmd == nil || len(f.created) != 0 {
 		t.Fatal("save did not start asynchronously")
 	}
@@ -466,7 +469,7 @@ func TestQuickCaptureAndRefresh(t *testing.T) {
 	}
 	next, _ = m.Update(refresh())
 	m = next.(Model)
-	if m.busy || m.notes[m.selected].ID != "created" || !strings.Contains(m.View(), "Note saved") {
+	if m.busy || m.notes[m.selected].ID != "created" || !strings.Contains(m.View().Content, "Note saved") {
 		t.Fatal("new note was not selected after refresh")
 	}
 }
@@ -475,24 +478,24 @@ func TestQuickCaptureEmptyAndFailureRetainDraft(t *testing.T) {
 	f := &fakeAPI{createErr: &api.Error{Status: 503, Code: "service_unavailable"}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	m.draft.SetValue(" \n ")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if cmd != nil || len(f.created) != 0 {
 		t.Fatal("blank note submitted")
 	}
 	m.draft.SetValue("Keep me")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != captureStage || m.busy || m.draft.Value() != "Keep me" || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != captureStage || m.busy || m.draft.Value() != "Keep me" || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("failed save lost draft")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != discardStage || m.draft.Value() != "Keep me" {
 		t.Fatal("Esc should confirm before discarding draft")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('y'))
 	if m.stage != inboxStage || m.draft.Value() != "" {
 		t.Fatal("confirmed discard did not clear draft")
 	}
@@ -504,7 +507,7 @@ func TestQuickCaptureUnauthorizedResumesAfterSignIn(t *testing.T) {
 	m := New(f, s)
 	m.stage, m.busy, m.token = captureStage, false, "expired"
 	m.draft.SetValue("Unsent note")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if m.stage != loginStage || !m.resumeDraft || m.draft.Value() != "Unsent note" || s.token != "" {
@@ -530,17 +533,17 @@ func TestInboxPaginationAndRefresh(t *testing.T) {
 	}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd := press(m, runeKey('r'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 2 || m.nextCursor != first {
 		t.Fatal("first page did not load")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	if !m.busy || cmd == nil {
 		t.Fatal("older page did not start")
 	}
-	m, blocked := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, blocked := press(m, runeKey('m'))
 	if blocked != nil {
 		t.Fatal("sent duplicate page request while loading")
 	}
@@ -549,17 +552,17 @@ func TestInboxPaginationAndRefresh(t *testing.T) {
 	if len(m.notes) != 3 || m.selected != 2 || m.notes[2].ID != "old" || m.nextCursor != second || len(f.requested) != 1 || f.requested[0] != first {
 		t.Fatalf("page 2: %+v, %v", m.notes, f.requested)
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 4 || m.selected != 3 || m.nextCursor != "" || f.requested[1] != second {
 		t.Fatal("final page did not load")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	if cmd != nil || len(f.requested) != 2 {
 		t.Fatal("requested beyond final page")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd = press(m, runeKey('r'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 2 || m.selected != 0 || m.nextCursor != first {
@@ -574,15 +577,15 @@ func TestOlderPageFailurePreservesListAndCursor(t *testing.T) {
 	m.stage, m.busy, m.token = inboxStage, false, "token"
 	m.notes = []api.Note{{ID: "existing", Content: "existing"}}
 	m.nextCursor = cursor
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd := press(m, runeKey('m'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.busy || len(m.notes) != 1 || m.nextCursor != cursor || !strings.Contains(m.View(), "retry") {
+	if m.busy || len(m.notes) != 1 || m.nextCursor != cursor || !strings.Contains(m.View().Content, "retry") {
 		t.Fatal("failed page lost existing notes or cursor")
 	}
 	f.pageErr = nil
 	f.pages = map[string]api.NotesPage{cursor: {Items: []api.Note{{ID: "older", Content: "older"}}}}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 2 || m.notes[1].ID != "older" || m.nextCursor != "" {
@@ -594,22 +597,22 @@ func TestEditFromReaderUpdatesNoteWithoutReordering(t *testing.T) {
 	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "before", CreatedAt: time.Now()}, {ID: "two", Content: "second", CreatedAt: time.Now()}}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = press(m, runeKey('e'))
 	if m.stage != captureStage || m.draft.Value() != "before" || m.editorID != "one" {
 		t.Fatal("editor did not load selected note")
 	}
 	m.draft.SetValue("after\nline")
-	if !strings.Contains(m.View(), "10 / 20,000 characters") || !strings.Contains(m.View(), "unsaved") {
+	if !strings.Contains(m.View().Content, "10 / 20,000 characters") || !strings.Contains(m.View().Content, "unsaved") {
 		t.Fatal("editor did not show character count and dirty status")
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if cmd == nil || len(f.updated) != 0 {
 		t.Fatal("edit not dispatched asynchronously")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != readingStage || m.busy || m.notes[0].Content != "after\nline" || m.notes[1].ID != "two" || !strings.Contains(m.View(), "after") || len(f.updated) != 1 {
+	if m.stage != readingStage || m.busy || m.notes[0].Content != "after\nline" || m.notes[1].ID != "two" || !strings.Contains(m.View().Content, "after") || len(f.updated) != 1 {
 		t.Fatal("edit did not update reader and preserve list order")
 	}
 }
@@ -618,23 +621,23 @@ func TestEditDiscardConfirmationAndNoOpSave(t *testing.T) {
 	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "original"}}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = press(m, runeKey('e'))
+	m, cmd := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if cmd != nil || len(f.updated) != 0 || m.stage != inboxStage {
 		t.Fatal("unchanged edit sent API request")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	m.draft.SetValue("different")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != discardStage || len(f.updated) != 0 {
 		t.Fatal("Esc silently lost edits")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if m.stage != captureStage || m.draft.Value() != "different" {
 		t.Fatal("cancel discard did not retain edits")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = press(m, runeKey('y'))
 	if m.stage != inboxStage || m.draft.Value() != "" || f.notes[0].Content != "original" {
 		t.Fatal("confirmed discard changed note")
 	}
@@ -644,12 +647,12 @@ func TestEditFailureRetainsDraft(t *testing.T) {
 	f := &fakeAPI{updateErr: &api.Error{Status: 404, Code: "not_found"}, notes: []api.Note{{ID: "one", Content: "old"}}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	m.draft.SetValue("important changes")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != captureStage || m.draft.Value() != "important changes" || m.notes[0].Content != "old" || !strings.Contains(m.View(), "no longer available") {
+	if m.stage != captureStage || m.draft.Value() != "important changes" || m.notes[0].Content != "old" || !strings.Contains(m.View().Content, "no longer available") {
 		t.Fatal("failed edit lost draft")
 	}
 }
@@ -659,17 +662,17 @@ func TestDeleteRequiresConfirmationAndPreservesCursor(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
 	m.selected, m.nextCursor = 1, "older-cursor"
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.stage != deleteStage || !strings.Contains(m.View(), "no Trash") || len(f.deleted) != 0 {
+	m, _ = press(m, runeKey('d'))
+	if m.stage != deleteStage || !strings.Contains(m.View().Content, "no Trash") || len(f.deleted) != 0 {
 		t.Fatal("delete did not require confirmation")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if m.stage != inboxStage || len(f.deleted) != 0 {
 		t.Fatal("cancel triggered deletion")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = press(m, runeKey('d'))
+	m, cmd := press(m, runeKey('y'))
 	if !m.busy || cmd == nil || len(f.deleted) != 0 {
 		t.Fatal("delete not asynchronous")
 	}
@@ -684,11 +687,11 @@ func TestDeleteFailureKeepsNote(t *testing.T) {
 	f := &fakeAPI{deleteErr: errors.New("connection lost"), notes: []api.Note{{ID: "one", Content: "first"}}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.notes = inboxStage, false, "token", append([]api.Note(nil), f.notes...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('d'))
+	m, cmd := press(m, runeKey('y'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != inboxStage || len(m.notes) != 1 || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != inboxStage || len(m.notes) != 1 || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("delete failure removed note")
 	}
 }
@@ -696,18 +699,18 @@ func TestDeleteFailureKeepsNote(t *testing.T) {
 func TestQuitWithDirtyEditorNeedsConfirmation(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
 	m.stage, m.busy = inboxStage, false
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	m.draft.SetValue("do not lose")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd != nil || m.stage != discardStage || !m.quitAfterDiscard {
 		t.Fatal("quit lost unsaved draft")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != captureStage || m.quitAfterDiscard || m.draft.Value() != "do not lose" {
 		t.Fatal("cancel quit lost draft")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m, cmd = press(m, runeKey('y'))
 	if cmd == nil {
 		t.Fatal("confirmed quit did not exit")
 	}
@@ -723,11 +726,11 @@ func TestProjectNavigationAndInboxRestore(t *testing.T) {
 	m.stage, m.busy, m.token = inboxStage, false, "token"
 	loaded, _ := m.Update(inboxResult{account: api.Account{Username: "Ari"}, page: api.NotesPage{Items: f.notes}})
 	m = loaded.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.selected != 1 {
 		t.Fatal("setup: expected second Inbox note selected")
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m, cmd := press(m, runeKey('p'))
 	if m.stage != projectsStage || !m.busy || cmd == nil {
 		t.Fatal("p did not open loading project list")
 	}
@@ -736,30 +739,30 @@ func TestProjectNavigationAndInboxRestore(t *testing.T) {
 	if m.busy || len(m.projects) != 2 || m.projectSelected != 0 {
 		t.Fatal("projects list did not load")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.busy || m.activeProject == nil || m.activeProject.ID != "p2" || !m.inboxStashed {
 		t.Fatal("Enter did not open the selected project with Inbox stashed")
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.busy || len(m.notes) != 1 || m.notes[0].ID != "pn1" || !strings.Contains(m.View(), "Second") {
+	if m.busy || len(m.notes) != 1 || m.notes[0].ID != "pn1" || !strings.Contains(m.View().Content, "Second") {
 		t.Fatal("project notes did not load under the project title")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.stage != readingStage || !strings.Contains(m.View(), "project note") {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.stage != readingStage || !strings.Contains(m.View().Content, "project note") {
 		t.Fatal("project note reader failed")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != projectsStage || m.activeProject != nil {
 		t.Fatal("Esc did not return from project notes to the project list")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m, _ = press(m, runeKey('i'))
 	if m.stage != inboxStage || m.activeProject != nil || m.notes[m.selected].ID != "inbox-two" || m.nextCursor != "" {
 		t.Fatal("Inbox snapshot was not restored with selection")
 	}
-	if !strings.Contains(m.View(), "Inbox") {
+	if !strings.Contains(m.View().Content, "Inbox") {
 		t.Fatal("Inbox header not restored")
 	}
 }
@@ -775,24 +778,24 @@ func TestProjectNoteCreateEditDeletePaginate(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = projectsStage, false, "token"
 	m.projects = f.projectList
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if m.activeProject == nil {
 		t.Fatal("setup: project did not open")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 2 || f.projectRequested[0] != cursor {
 		t.Fatal("older project notes did not load through the project cursor")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, cmd = press(m, runeKey('n'))
 	if m.stage != captureStage {
 		t.Fatal("n did not open the editor inside the project")
 	}
 	m.draft.SetValue("for the project")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	next, refresh := m.Update(cmd())
 	m = next.(Model)
 	if f.projectCreated[0] != "for the project" || len(f.created) != 0 {
@@ -803,16 +806,16 @@ func TestProjectNoteCreateEditDeletePaginate(t *testing.T) {
 	if m.notes[m.selected].Content != "for the project" {
 		t.Fatal("created project note not selected after refresh")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	m.draft.SetValue("edited in project")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.notes[m.selected].Content != "edited in project" {
 		t.Fatal("project note edit failed")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('d'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(f.deleted) != 1 || len(m.notes) != 1 || m.notes[0].ID != "pn1" {
@@ -824,16 +827,16 @@ func TestCreateProjectFlow(t *testing.T) {
 	f := &fakeAPI{}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = projectsStage, false, "token"
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = press(m, runeKey('a'))
 	if m.stage != newProjectStage {
 		t.Fatal("a did not open the new-project form")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if strings.Contains(m.View(), "Enter a project name") == false {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if strings.Contains(m.View().Content, "Enter a project name") == false {
 		t.Fatal("empty name accepted")
 	}
 	m.inputs[projectNameInput].SetValue("Research")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.busy || cmd == nil {
 		t.Fatal("project creation not dispatched")
 	}
@@ -854,10 +857,10 @@ func TestCreateProjectFailureKeepsForm(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = newProjectStage, false, "token"
 	m.inputs[projectNameInput].SetValue("Nope")
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != newProjectStage || m.inputs[projectNameInput].Value() != "Nope" || !strings.Contains(m.View(), "1–120") {
+	if m.stage != newProjectStage || m.inputs[projectNameInput].Value() != "Nope" || !strings.Contains(m.View().Content, "1–120") {
 		t.Fatal("failed creation lost the form")
 	}
 }
@@ -874,25 +877,25 @@ func TestMoveInboxNoteFromReaderAndCancel(t *testing.T) {
 	m.notes = append([]api.Note(nil), f.notes...)
 	m.nextCursor = cursor
 	m.selected = 1
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, cmd := press(m, runeKey('v'))
 	if m.stage != moveStage || !m.busy || cmd == nil {
 		t.Fatal("move picker not opened from reader")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if len(m.moveTargets) != 2 || m.moveTargets[0].id != "p1" || m.moveTargets[1].id != "p2" || strings.Contains(m.View(), "Inbox\n\nInbox") {
+	if len(m.moveTargets) != 2 || m.moveTargets[0].id != "p1" || m.moveTargets[1].id != "p2" || strings.Contains(m.View().Content, "Inbox\n\nInbox") {
 		t.Fatal("Inbox picker has wrong targets")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != readingStage || len(f.moved) != 0 {
 		t.Fatal("Esc did not cancel move")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m, cmd = press(m, runeKey('v'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil || !m.busy || len(f.moved) != 0 {
 		t.Fatal("move was not asynchronous")
 	}
@@ -912,41 +915,41 @@ func TestMoveProjectNoteToInboxRefreshesStaleSnapshot(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
 	m.notes = append([]api.Note(nil), f.notes...)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m, cmd := press(m, runeKey('p'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.activeProject == nil || !m.inboxStashed {
 		t.Fatal("project did not open with Inbox stashed")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m, cmd = press(m, runeKey('v'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.moveTargets) != 2 || m.moveTargets[0].name != "Inbox" || m.moveTargets[1].id != "p2" {
 		t.Fatal("project picker failed to exclude source project")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != inboxStage || len(m.notes) != 1 || m.notes[0].ID != "project-two" || !m.inboxNeedsRefresh || f.moved[0] != "project-one:" {
 		t.Fatal("move to Inbox failed or snapshot not invalidated")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != projectsStage {
 		t.Fatal("did not return to project list")
 	}
 	// Visiting a second project must not re-stash the old Inbox.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, other := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, other := press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(other())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.inboxNeedsRefresh {
 		t.Fatal("visiting another project cleared Inbox invalidation")
 	}
-	m, reload := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m, reload := press(m, runeKey('i'))
 	if reload == nil || !m.busy {
 		t.Fatal("stale Inbox snapshot used instead of fetching")
 	}
@@ -962,28 +965,28 @@ func TestMoveFailureAndNoDestinationKeepNote(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
 	m.notes = append([]api.Note(nil), f.notes...)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m, cmd := press(m, runeKey('v'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if len(m.moveTargets) != 0 || !strings.Contains(m.View(), "No other active locations") {
+	if len(m.moveTargets) != 0 || !strings.Contains(m.View().Content, "No other active locations") {
 		t.Fatal("empty destination picker is unclear")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil || len(f.moved) != 0 || len(m.notes) != 1 {
 		t.Fatal("move sent without destination")
 	}
 	f.projectList = []api.Project{{ID: "p1", Name: "Work"}}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd = press(m, runeKey('r'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	f.moveErr = &api.Error{Status: 409, Code: "conflict"}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != moveStage || len(m.notes) != 1 || m.notes[0].ID != "one" || !strings.Contains(m.View(), "archived") {
+	if m.stage != moveStage || len(m.notes) != 1 || m.notes[0].ID != "one" || !strings.Contains(m.View().Content, "archived") {
 		t.Fatal("failed move lost note or picker")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != inboxStage || len(m.notes) != 1 {
 		t.Fatal("cancel after failure lost note")
 	}
@@ -1000,16 +1003,16 @@ func TestArchiveBrowseReadOnlyAndUnarchive(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = projectsStage, false, "token"
 	m.projects = append([]api.Project(nil), f.projectList...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	if m.stage != archiveStage || len(f.archiveCalls) != 0 || !strings.Contains(m.View(), "cannot edit") {
+	m, _ = press(m, runeKey('x'))
+	if m.stage != archiveStage || len(f.archiveCalls) != 0 || !strings.Contains(m.View().Content, "cannot edit") {
 		t.Fatal("archive did not require an informative confirmation")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if m.stage != projectsStage || len(f.archiveCalls) != 0 {
 		t.Fatal("cancel archived the project")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('x'))
+	m, cmd := press(m, runeKey('y'))
 	if !m.busy || cmd == nil || len(f.archiveCalls) != 0 {
 		t.Fatal("archive not asynchronous")
 	}
@@ -1018,50 +1021,50 @@ func TestArchiveBrowseReadOnlyAndUnarchive(t *testing.T) {
 	if m.stage != projectsStage || m.busy || len(m.projects) != 1 || m.projects[0].ID != "p2" || f.archiveCalls[0] != "p1" {
 		t.Fatal("archived project not removed from active list")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m, cmd = press(m, runeKey('t'))
 	if !m.showArchived || !m.busy || cmd == nil {
 		t.Fatal("t did not switch to archived")
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if len(m.projects) != 1 || m.projects[0].ArchivedAt == nil || !strings.Contains(m.View(), "Archived projects") {
+	if len(m.projects) != 1 || m.projects[0].ArchivedAt == nil || !strings.Contains(m.View().Content, "Archived projects") {
 		t.Fatal("archived list did not load")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if !m.archivedProject() || !strings.Contains(m.View(), "read-only") || m.nextCursor != cursor {
+	if !m.archivedProject() || !strings.Contains(m.View().Content, "read-only") || m.nextCursor != cursor {
 		t.Fatal("archived project did not open read-only")
 	}
 	for _, key := range []rune{'n', 'e', 'd', 'v'} {
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		m, cmd = press(m, runeKey(key))
 		if cmd != nil || m.stage != inboxStage || len(f.created)+len(f.updated)+len(f.deleted)+len(f.moved) != 0 {
 			t.Fatalf("archived note write key %c was not blocked", key)
 		}
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m, cmd = press(m, runeKey('m'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.notes) != 2 {
 		t.Fatal("archived notes pagination failed")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.stage != readingStage || !strings.Contains(m.View(), "historical note") {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.stage != readingStage || !strings.Contains(m.View().Content, "historical note") {
 		t.Fatal("archived note not readable")
 	}
 	for _, key := range []rune{'e', 'd', 'v'} {
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		m, cmd = press(m, runeKey(key))
 		if cmd != nil || m.stage != readingStage {
 			t.Fatalf("archived reader write key %c was not blocked", key)
 		}
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != projectsStage || !m.showArchived {
 		t.Fatal("return from archived notes lost list state")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m, cmd = press(m, runeKey('u'))
 	if !m.busy || cmd == nil {
 		t.Fatal("unarchive not dispatched")
 	}
@@ -1070,19 +1073,19 @@ func TestArchiveBrowseReadOnlyAndUnarchive(t *testing.T) {
 	if m.stage != projectsStage || len(m.projects) != 0 || f.unarchiveCalls[0] != "p1" {
 		t.Fatal("unarchived project not removed from archived list")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m, cmd = press(m, runeKey('t'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.showArchived || len(m.projects) != 2 {
 		t.Fatal("active projects did not show unarchived project")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.archivedProject() {
 		t.Fatal("unarchived project remained read-only")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, cmd = press(m, runeKey('n'))
 	if m.stage != captureStage || cmd == nil {
 		t.Fatal("unarchived project did not allow note creation")
 	}
@@ -1093,11 +1096,11 @@ func TestArchiveFailureKeepsListAndSelection(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = projectsStage, false, "token"
 	m.projects = append([]api.Project(nil), f.projectList...)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('x'))
+	m, cmd := press(m, runeKey('y'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != projectsStage || len(m.projects) != 1 || m.projectSelected != 0 || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != projectsStage || len(m.projects) != 1 || m.projectSelected != 0 || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("failed archive lost project list")
 	}
 }
@@ -1108,10 +1111,10 @@ func TestUnarchiveFailureKeepsArchivedList(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token, m.showArchived = projectsStage, false, "token", true
 	m.projects = append([]api.Project(nil), f.archivedList...)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m, cmd := press(m, runeKey('u'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != projectsStage || len(m.projects) != 1 || !m.showArchived || m.projects[0].ID != "p1" || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != projectsStage || len(m.projects) != 1 || !m.showArchived || m.projects[0].ID != "p1" || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("failed unarchive lost archived project")
 	}
 }
@@ -1125,16 +1128,16 @@ func TestMoveTargetsRemainActiveWhenViewingArchivedProjects(t *testing.T) {
 	}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.token = projectsStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m, cmd := press(m, runeKey('t'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if !m.showArchived || len(m.projects) != 1 || m.projects[0].ID != "archived" {
 		t.Fatal("setup failed")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m, cmd = press(m, runeKey('i'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m, cmd = press(m, runeKey('v'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.moveTargets) != 1 || m.moveTargets[0].id != "active" || m.projects[0].ID != "archived" {
@@ -1147,30 +1150,30 @@ func TestSessionsRevokeRemoteAndLogout(t *testing.T) {
 	store := &fakeStore{token: "token"}
 	m := New(f, store)
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd := press(m, runeKey('s'))
 	if m.stage != sessionsStage || cmd == nil {
 		t.Fatal("sessions did not open")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if len(m.sessions) != 2 || !strings.Contains(m.View(), "this device") {
+	if len(m.sessions) != 2 || !strings.Contains(m.View().Content, "this device") {
 		t.Fatal("current session not displayed")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = press(m, runeKey('x'))
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if len(f.revokeCalls) != 0 || m.stage != sessionsStage {
 		t.Fatal("cancel revoked session")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('x'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(f.revokeCalls) != 1 || f.revokeCalls[0] != "there" || len(m.sessions) != 1 || m.stage != sessionsStage || store.deletes != 0 {
 		t.Fatal("remote revoke failed or signed out current device")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('l'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if f.logoutCalls != 1 || m.stage != loginStage || m.token != "" || store.deletes != 1 {
@@ -1183,19 +1186,19 @@ func TestSessionsRevokeAllAndFailures(t *testing.T) {
 	store := &fakeStore{token: "token"}
 	m := New(f, store)
 	m.stage, m.busy, m.token = projectsStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd := press(m, runeKey('s'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('a'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != sessionsStage || m.token != "token" || store.deletes != 0 || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != sessionsStage || m.token != "token" || store.deletes != 0 || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("failed revoke-all lost session")
 	}
 	f.actionErr = nil
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('a'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != loginStage || m.token != "" || store.deletes != 1 || f.revokeAllCalls != 2 {
@@ -1208,14 +1211,14 @@ func TestRevokeCurrentSessionSignsOut(t *testing.T) {
 	store := &fakeStore{token: "token"}
 	m := New(f, store)
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd := press(m, runeKey('s'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	if !strings.Contains(m.View(), "sign you out") {
+	m, _ = press(m, runeKey('x'))
+	if !strings.Contains(m.View().Content, "sign you out") {
 		t.Fatal("missing current device warning")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != loginStage || store.deletes != 1 || m.token != "" {
@@ -1227,21 +1230,21 @@ func TestSessionsLoadFailureCanRetryOrReturn(t *testing.T) {
 	f := &fakeAPI{sessionErr: errors.New("offline")}
 	m := New(f, &fakeStore{token: "token"})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd := press(m, runeKey('s'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != sessionsStage || !strings.Contains(m.View(), "Could not load") {
+	if m.stage != sessionsStage || !strings.Contains(m.View().Content, "Could not load") {
 		t.Fatal("session load failure not visible")
 	}
 	f.sessionErr = nil
 	f.sessionList = []api.Session{{ID: "here", Current: true}}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd = press(m, runeKey('r'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if len(m.sessions) != 1 || m.busy {
 		t.Fatal("session retry failed")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != inboxStage || m.token != "token" {
 		t.Fatal("return from sessions lost sign-in")
 	}
@@ -1252,11 +1255,11 @@ func TestSessionActionUnauthorizedClearsCredential(t *testing.T) {
 	store := &fakeStore{token: "token"}
 	m := New(f, store)
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd := press(m, runeKey('s'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = press(m, runeKey('x'))
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if m.stage != loginStage || m.token != "" || store.deletes != 1 {
@@ -1268,35 +1271,35 @@ func TestAccountProfileEditDiscardAndSave(t *testing.T) {
 	f := &fakeAPI{account: api.Account{ID: "a1", Username: "Ari", TimeZone: "Europe/London"}}
 	m := New(f, &fakeStore{token: "token"})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, cmd := press(m, runeKey('g'))
 	if m.stage != accountStage || cmd == nil {
 		t.Fatal("account did not open")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if !strings.Contains(m.View(), "Europe/London") {
+	if !strings.Contains(m.View().Content, "Europe/London") {
 		t.Fatal("profile not shown")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Ari" {
 		t.Fatal("profile not prefilled")
 	}
 	m.inputs[accountNameInput].SetValue("Changed")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != accountDiscardStage {
 		t.Fatal("unsaved profile not protected")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if m.stage != accountEditStage {
 		t.Fatal("discard cancel failed")
 	}
 	m.inputs[accountZoneInput].SetValue("Invalid/Zone")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if f.profileCalls != 0 || !strings.Contains(m.message, "IANA") {
 		t.Fatal("invalid profile was sent")
 	}
 	m.inputs[accountZoneInput].SetValue("UTC")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil || !m.busy || f.profileCalls != 0 {
 		t.Fatal("profile save not asynchronous")
 	}
@@ -1305,8 +1308,8 @@ func TestAccountProfileEditDiscardAndSave(t *testing.T) {
 	if m.stage != accountStage || m.username != "Changed" || m.account.TimeZone != "UTC" || f.profileCalls != 1 {
 		t.Fatal("profile not saved locally")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.stage != inboxStage || !strings.Contains(m.View(), "Changed") {
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.stage != inboxStage || !strings.Contains(m.View().Content, "Changed") {
 		t.Fatal("updated name not reflected in Inbox")
 	}
 }
@@ -1316,34 +1319,34 @@ func TestAccountDeletionConfirmationAndFailure(t *testing.T) {
 	store := &fakeStore{token: "token"}
 	m := New(f, store)
 	m.stage, m.busy, m.token = projectsStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, cmd := press(m, runeKey('g'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.stage != accountDeleteStage || !strings.Contains(m.View(), "30 days") {
+	m, _ = press(m, runeKey('d'))
+	if m.stage != accountDeleteStage || !strings.Contains(m.View().Content, "30 days") {
 		t.Fatal("deletion warning missing")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if f.deletionCalls != 0 {
 		t.Fatal("deletion sent without phrase")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stage != accountStage || f.deletionCalls != 0 {
 		t.Fatal("cancel sent deletion")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m, _ = press(m, runeKey('d'))
 	m.inputs[deletePhraseInput].SetValue("DELETE")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != accountDeleteStage || store.deletes != 0 || m.token != "token" || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != accountDeleteStage || store.deletes != 0 || m.token != "token" || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("failed deletion signed out")
 	}
 	f.deletionErr = nil
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != loginStage || store.deletes != 1 || m.token != "" || f.deletionCalls != 2 || !strings.Contains(m.View(), "Oct 29") {
+	if m.stage != loginStage || store.deletes != 1 || m.token != "" || f.deletionCalls != 2 || !strings.Contains(m.View().Content, "Oct 29") {
 		t.Fatal("accepted deletion did not sign out and show deadline")
 	}
 }
@@ -1352,27 +1355,27 @@ func TestAccountLoadFailureAndProfileSaveFailure(t *testing.T) {
 	f := &fakeAPI{accountErr: errors.New("offline"), account: api.Account{ID: "a1", Username: "Ari", TimeZone: "UTC"}}
 	m := New(f, &fakeStore{token: "token"})
 	m.stage, m.busy, m.token = inboxStage, false, "token"
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, cmd := press(m, runeKey('g'))
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if !strings.Contains(m.View(), "Could not load") {
+	if !strings.Contains(m.View().Content, "Could not load") {
 		t.Fatal("load failure not shown")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	if m.stage != accountStage {
 		t.Fatal("editing unloaded account allowed")
 	}
 	f.accountErr = nil
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd = press(m, runeKey('r'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = press(m, runeKey('e'))
 	m.inputs[accountNameInput].SetValue("Changed")
 	f.profileErr = errors.New("offline")
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Changed" || m.username == "Changed" || !strings.Contains(m.View(), "not confirmed") {
+	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Changed" || m.username == "Changed" || !strings.Contains(m.View().Content, "not confirmed") {
 		t.Fatal("profile failure lost draft")
 	}
 }
@@ -1383,29 +1386,29 @@ func TestTelegramSignInAndNewProfile(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.login.step = loginStage, false, emailStep
 	m.login.openBrowser = func(string) error { return errors.New("no browser") }
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	if cmd == nil || !m.busy {
 		t.Fatal("Telegram start not dispatched")
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.login.step != telegramStep || strings.Contains(m.View(), "private-secret") {
+	if m.login.step != telegramStep || strings.Contains(m.View().Content, "private-secret") {
 		t.Fatal("attempt not started securely")
 	}
 	next, _ = m.Update(telegramBrowserResult{attempt: "attempt", err: errors.New("no browser")})
 	m = next.(Model)
-	if !strings.Contains(m.View(), start.AuthorizationURL) {
+	if !strings.Contains(m.View().Content, start.AuthorizationURL) {
 		t.Fatal("no manual browser fallback")
 	}
-	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, poll := press(m, runeKey('r'))
 	next, _ = m.Update(poll())
 	m = next.(Model)
-	if m.login.step != telegramStep || m.busy || strings.Contains(m.View(), "private-secret") {
+	if m.login.step != telegramStep || m.busy || strings.Contains(m.View().Content, "private-secret") {
 		t.Fatal("pending result failed")
 	}
 	f.telegramPollErr = &api.Error{Status: 422, Code: "profile_required"}
 	m.login.values.zone = "" // start the profile form empty whatever the machine's TZ
-	m, poll = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, poll = press(m, runeKey('r'))
 	next, _ = m.Update(poll())
 	m = next.(Model)
 	if m.login.step != profileStep || !m.login.telegramLogin {
@@ -1413,9 +1416,9 @@ func TestTelegramSignInAndNewProfile(t *testing.T) {
 	}
 	f.telegramPollErr = nil
 	m = typeText(m, "New User")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	m = typeText(m, "UTC")
-	m, poll = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, poll = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	next, _ = m.Update(poll())
 	m = next.(Model)
 	if m.stage != inboxStage || m.token != "telegram-token" || m.login.telegramSecret != "" || len(f.telegramPollCalls) != 3 || !strings.Contains(f.telegramPollCalls[2], "New User:UTC") {
@@ -1429,16 +1432,16 @@ func TestTelegramRestoreRequiresConsent(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.login.step = loginStage, false, emailStep
 	m.login.openBrowser = func(string) error { return nil }
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, poll := press(m, runeKey('r'))
 	next, _ = m.Update(poll())
 	m = next.(Model)
-	if m.login.step != restoreStep || strings.Contains(m.View(), "private-ticket") || f.telegramRestoreCalls != 0 {
+	if m.login.step != restoreStep || strings.Contains(m.View().Content, "private-ticket") || f.telegramRestoreCalls != 0 {
 		t.Fatal("restore consent was skipped or secret leaked")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, cmd = press(m, runeKey('y'))
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	if f.telegramRestoreCalls != 1 || m.stage != inboxStage || m.token != "telegram-token" {
@@ -1451,21 +1454,21 @@ func TestTelegramCancelAndUnsafeURL(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.login.step = loginStage, false, emailStep
 	m.login.openBrowser = func(string) error { t.Fatal("unsafe browser URL opened"); return nil }
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.login.step != emailStep || !strings.Contains(m.View(), "unsafe") || m.login.telegramSecret != "" {
+	if m.login.step != emailStep || !strings.Contains(m.View().Content, "unsafe") || m.login.telegramSecret != "" {
 		t.Fatal("unsafe URL accepted")
 	}
 	f.telegramStart.AuthorizationURL = "https://oauth.telegram.org/auth"
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	m, poll := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, poll := press(m, runeKey('r'))
 	if !m.busy {
 		t.Fatal("poll not running")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.login.step != emailStep || m.busy || m.login.telegramSecret != "" {
 		t.Fatal("could not cancel in-flight poll")
 	}
@@ -1481,7 +1484,7 @@ func TestTelegramAutomaticPollAndStaleTick(t *testing.T) {
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.login.step = loginStage, false, emailStep
 	m.login.openBrowser = func(string) error { return nil }
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
 	tick := telegramTick{attempt: m.login.telegramAttempt, generation: m.login.telegramGeneration}
@@ -1500,7 +1503,7 @@ func TestTelegramAutomaticPollAndStaleTick(t *testing.T) {
 	if stale != nil || len(f.telegramPollCalls) != 1 {
 		t.Fatal("stale tick caused duplicate poll")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	next, ignored := m.Update(telegramTick{attempt: "attempt", generation: m.login.telegramGeneration})
 	m = next.(Model)
 	if ignored != nil || m.login.step != emailStep {
@@ -1512,17 +1515,17 @@ func TestTelegramRestoreDeclineAndStartFailure(t *testing.T) {
 	f := &fakeAPI{telegramStartErr: &api.Error{Status: 503, Code: "service_unavailable"}}
 	m := New(f, &fakeStore{})
 	m.stage, m.busy, m.login.step = loginStage, false, emailStep
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.login.step != emailStep || m.busy || !strings.Contains(m.View(), "unavailable") {
+	if m.login.step != emailStep || m.busy || !strings.Contains(m.View().Content, "unavailable") {
 		t.Fatal("unconfigured Telegram server failure not shown")
 	}
 	m.login.telegramLogin = true
 	m.login.telegramAttempt = "attempt"
 	m.login.ticket = "private-ticket"
 	m.stage, m.login.step = loginStage, restoreStep
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m, _ = press(m, runeKey('n'))
 	if m.login.step != menuStep || f.telegramRestoreCalls != 0 || m.login.ticket != "" || m.login.telegramAttempt != "" {
 		t.Fatal("declining restore did not clear secrets")
 	}
@@ -1530,7 +1533,7 @@ func TestTelegramRestoreDeclineAndStartFailure(t *testing.T) {
 
 func TestEditorFitsPaddedLayoutWithoutBlackCursorLine(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
-	if _, ok := m.draft.FocusedStyle.CursorLine.GetBackground().(lipgloss.NoColor); !ok {
+	if _, ok := m.draft.Styles().Focused.CursorLine.GetBackground().(lipgloss.NoColor); !ok {
 		t.Fatal("focused editor line has a background color")
 	}
 	m.stage, m.busy = captureStage, false
@@ -1541,14 +1544,14 @@ func TestEditorFitsPaddedLayoutWithoutBlackCursorLine(t *testing.T) {
 			t.Fatalf("textarea line width %d exceeds inner width %d", width, m.innerWidth())
 		}
 	}
-	for _, line := range strings.Split(m.View(), "\n") {
+	for _, line := range strings.Split(m.View().Content, "\n") {
 		if width := lipgloss.Width(line); width > m.contentWidth() {
 			t.Fatalf("rendered line width %d exceeds frame width %d", width, m.contentWidth())
 		}
 	}
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 52, Height: 18})
 	m = next.(Model)
-	if m.draft.Width() != m.innerWidth() || m.reader.Width != m.innerWidth() {
+	if m.draft.Width() != m.innerWidth() || m.reader.Width() != m.innerWidth() {
 		t.Fatal("editor or reader width did not track resized inner content area")
 	}
 }

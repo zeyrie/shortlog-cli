@@ -3,8 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-	colorful "github.com/lucasb-eyer/go-colorful"
+	"charm.land/lipgloss/v2"
 )
 
 // Wordmarks are assembled from per-letter glyphs so every row is exactly as
@@ -56,26 +55,12 @@ func wordmark(gap int, letters ...[]string) string {
 	return strings.Join(rows, "\n")
 }
 
-// Gradient endpoints for the wordmark. Lip Gloss downsamples them on terminals
-// without true color and drops them entirely when color is unavailable.
-var (
-	logoFrom = mustHex("#7DCFFF")
-	logoTo   = mustHex("#BB9AF7")
-)
-
-func mustHex(hex string) colorful.Color {
-	c, err := colorful.Hex(hex)
-	if err != nil {
-		panic(err)
-	}
-	return c
-}
-
 // renderLogo paints a wordmark with a left-to-right gradient. Block glyphs get
-// the full color; the box-drawing shadow of the large logo is dimmed so the
+// the full colour; the box-drawing shadow of the large logo is pushed toward
+// the background (darker on dark terminals, lighter on light ones) so the
 // letters read as raised.
 func renderLogo(logo string) string {
-	width := max(1, lipgloss.Width(logo)-1)
+	colors := lipgloss.Blend1D(max(2, lipgloss.Width(logo)), logoStops[0], logoStops[1])
 	var b strings.Builder
 	for i, line := range strings.Split(logo, "\n") {
 		if i > 0 {
@@ -86,11 +71,15 @@ func renderLogo(logo string) string {
 				b.WriteRune(r)
 				continue
 			}
-			c := logoFrom.BlendLuv(logoTo, float64(col)/float64(width)).Clamped()
+			c := colors[min(col, len(colors)-1)]
 			if r >= '─' && r <= '╿' { // box drawing: the large logo's shadow
-				c = c.BlendLab(colorful.Color{}, 0.55).Clamped()
+				if darkTheme {
+					c = lipgloss.Darken(c, 0.55)
+				} else {
+					c = lipgloss.Lighten(c, 0.55)
+				}
 			}
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render(string(r)))
+			b.WriteString(lipgloss.NewStyle().Foreground(c).Render(string(r)))
 		}
 	}
 	return b.String()

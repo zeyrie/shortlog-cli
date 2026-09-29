@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -41,7 +41,9 @@ func (l loginModel) card(content string) string {
 	width := loginFieldWidth(l.width, l.boxed())
 	style := lipgloss.NewStyle().Width(width)
 	if l.boxed() {
-		style = style.Width(width-2).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
+		// Lip Gloss v2 widths include the border, so this is the card's
+		// full width; its content gets width-4 (border and padding).
+		style = style.Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(accentColor)
 	}
 	return style.Render(content)
 }
@@ -100,9 +102,17 @@ func (l loginModel) telegramBlock(spinner string) string {
 	}
 	block := l.titled("Sign in with Telegram", l.card(l.loader(spinner, status)+"\n  "+dimStyle.Render(remaining)))
 	if l.telegramBrowserFailed {
+		// The link wraps to fit, and every piece is a clickable hyperlink
+		// (OSC 8) to the whole address in terminals that support it. c
+		// copies it without selecting across lines.
 		width := loginFieldWidth(l.width, l.boxed())
-		link := ansi.Hardwrap(safeText(l.telegramURL), width, true)
-		block += "\n\n" + lipgloss.NewStyle().Width(width).Render(dimStyle.Render("Open this link to approve:")+"\n"+link)
+		lines := strings.Split(ansi.Hardwrap(safeText(l.telegramURL), width, true), "\n")
+		link := lipgloss.NewStyle().Hyperlink(l.telegramURL)
+		for i, line := range lines {
+			lines[i] = link.Render(line)
+		}
+		label := dimStyle.Render("Open this link to approve, or press ") + helpKeyStyle.Render("c") + dimStyle.Render(" to copy it:")
+		block += "\n\n" + lipgloss.NewStyle().Width(width).Render(label+"\n"+strings.Join(lines, "\n"))
 		block = composeRows([]loginRow{{text: block, center: true}})
 	}
 	return block
@@ -205,15 +215,10 @@ func composeRows(rows []loginRow) string {
 func (l loginModel) notice(text string) string {
 	width := min(54, max(1, l.width-4))
 	if l.height < 16 {
-		return lipgloss.NewStyle().Width(width).Foreground(lipgloss.Color("6")).Render(safeText(text))
+		return lipgloss.NewStyle().Width(width).Foreground(accentColor).Render(safeText(text))
 	}
-	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Render(safeText(text))
+	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).Render(safeText(text))
 }
-
-var (
-	helpKeyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	menuRailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-)
 
 // menu renders the provider choices. The list model still owns selection
 // and key handling; this only draws it. The selected choice gets an accent

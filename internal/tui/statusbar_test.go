@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 var stripStatusANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -42,7 +42,7 @@ func TestStatusErrorsPersistUntilKeyPress(t *testing.T) {
 	m := New(&fakeAPI{}, &fakeStore{})
 	m.stage, m.busy = loginStage, false
 	m.status = s
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if next.(Model).status.current.text != "" {
 		t.Fatal("key press did not dismiss the error")
 	}
@@ -73,7 +73,7 @@ func TestFooterDefersToCardLoader(t *testing.T) {
 	m.stage, m.busy, m.origin = loginStage, false, "http://127.0.0.1:8080"
 	m.login.showForm(emailStep)
 	m = typeText(m, "a@example.com")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	footer := stripStatusANSI.ReplaceAllString(m.footer(), "")
 	status := footer[strings.LastIndex(footer, "\n")+1:]
 	if strings.Contains(status, "Sending") || strings.ContainsAny(status, strings.Join(spinnerFrames, "")) || !strings.Contains(status, "127.0.0.1:8080") {
@@ -134,7 +134,7 @@ func TestFooterFitsEveryScreen(t *testing.T) {
 func TestLoginErrorsGoToStatusLine(t *testing.T) {
 	m := New(&fakeAPI{telegramStartErr: fmt.Errorf("offline")}, &fakeStore{})
 	m.stage, m.busy = loginStage, false
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m, cmd := press(m, runeKey('2'))
 	if m.status.current.text != "Starting Telegram sign-in…" {
 		t.Fatalf("busy status = %q", m.status.current.text)
 	}
@@ -143,7 +143,7 @@ func TestLoginErrorsGoToStatusLine(t *testing.T) {
 	if m.status.current.level != statusError || m.message != "" {
 		t.Fatalf("failure: level %d, text %q, body message %q", m.status.current.level, m.status.current.text, m.message)
 	}
-	lines := strings.Split(stripStatusANSI.ReplaceAllString(m.View(), ""), "\n")
+	lines := strings.Split(stripStatusANSI.ReplaceAllString(m.View().Content, ""), "\n")
 	if last := lines[len(lines)-1]; !strings.Contains(last, "Could not start Telegram") {
 		t.Fatalf("error not on the last row: %q", last)
 	}
