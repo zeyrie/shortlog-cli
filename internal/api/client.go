@@ -115,6 +115,34 @@ func (c *Client) Me(ctx context.Context, token string) (Account, error) {
 	return result, err
 }
 
+type Session struct {
+	ID              string    `json:"id"`
+	UserAgent       string    `json:"user_agent"`
+	DeviceLabel     string    `json:"device_label"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastUsedAt      time.Time `json:"last_used_at"`
+	AuthenticatedAt time.Time `json:"authenticated_at"`
+	Current         bool      `json:"current"`
+}
+
+func (c *Client) Sessions(ctx context.Context, token string) ([]Session, error) {
+	var sessions []Session
+	err := c.get(ctx, "/v1/sessions", token, &sessions)
+	return sessions, err
+}
+
+func (c *Client) Logout(ctx context.Context, token string) error {
+	return c.writeNote(ctx, http.MethodPost, "/v1/auth/logout", token, nil, nil, http.StatusNoContent)
+}
+
+func (c *Client) RevokeSession(ctx context.Context, token, id string) error {
+	return c.writeNote(ctx, http.MethodDelete, "/v1/sessions/"+url.PathEscape(id), token, nil, nil, http.StatusNoContent)
+}
+
+func (c *Client) RevokeAllSessions(ctx context.Context, token string) error {
+	return c.writeNote(ctx, http.MethodPost, "/v1/sessions/revoke-all", token, nil, nil, http.StatusNoContent)
+}
+
 type Note struct {
 	ID        string    `json:"id"`
 	Content   string    `json:"content"`

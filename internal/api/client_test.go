@@ -415,3 +415,45 @@ func TestArchiveProjectEndpoints(t *testing.T) {
 		t.Fatalf("unarchive: %v", err)
 	}
 }
+
+func TestSessionEndpoints(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Error("missing session authorization")
+		}
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/sessions":
+			_, _ = w.Write([]byte(`[{"id":"device-1","user_agent":"shortlog-cli","device_label":"Laptop","created_at":"2026-09-29T10:00:00Z","last_used_at":"2026-09-29T11:00:00Z","authenticated_at":"2026-09-29T10:00:00Z","current":true}]`))
+		case "POST /v1/auth/logout", "DELETE /v1/sessions/device-1", "POST /v1/sessions/revoke-all":
+			if r.ContentLength > 0 {
+				t.Error("unexpected request body")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	c, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := c.Sessions(context.Background(), "secret")
+	if err != nil || len(items) != 1 || !items[0].Current || items[0].DeviceLabel != "Laptop" || items[0].LastUsedAt.IsZero() {
+		t.Fatalf("sessions: %+v %v", items, err)
+	}
+	if err := c.RevokeSession(context.Background(), "secret", "device-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RevokeAllSessions(context.Background(), "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Logout(context.Background(), "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 4 {
+		t.Fatalf("requests: %v", requests)
+	}
+}

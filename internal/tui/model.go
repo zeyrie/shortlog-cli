@@ -23,6 +23,10 @@ type emailAPI interface {
 	VerifyEmail(context.Context, string, string, string, string) (api.VerifyResult, error)
 	RestoreEmail(context.Context, string) (string, error)
 	Me(context.Context, string) (api.Account, error)
+	Sessions(context.Context, string) ([]api.Session, error)
+	Logout(context.Context, string) error
+	RevokeSession(context.Context, string, string) error
+	RevokeAllSessions(context.Context, string) error
 	Inbox(context.Context, string) (api.NotesPage, error)
 	InboxPage(context.Context, string, string) (api.NotesPage, error)
 	CreateInboxNote(context.Context, string, string) (api.Note, error)
@@ -62,6 +66,16 @@ const (
 	newProjectStage
 	moveStage
 	archiveStage
+	sessionsStage
+	sessionConfirmStage
+)
+
+type sessionAction int
+
+const (
+	revokeOne sessionAction = iota
+	revokeAll
+	logout
 )
 
 type moveTarget struct {
@@ -96,6 +110,11 @@ type Model struct {
 	projectSelected   int
 	showArchived      bool
 	archiveID         string
+	sessions          []api.Session
+	sessionSelected   int
+	sessionBack       stage
+	sessionAction     sessionAction
+	sessionID         string
 	nextCursor        string
 	selected          int
 	reader            viewport.Model
@@ -191,7 +210,15 @@ type inboxResult struct {
 	err     error
 	saveErr error
 }
-type clearedSession struct{ err error }
+type sessionsResult struct {
+	sessions []api.Session
+	err      error
+}
+type sessionActionResult struct {
+	action sessionAction
+	id     string
+	err    error
+}
 type createdNote struct {
 	note api.Note
 	err  error
@@ -255,6 +282,42 @@ func (m Model) fetchProjects() tea.Cmd {
 	}
 }
 
+func (m Model) fetchSessions() tea.Cmd {
+	return func() tea.Msg {
+		items, err := m.api.Sessions(context.Background(), m.token)
+		return sessionsResult{items, err}
+	}
+}
+
+func (m *Model) openSessions(back stage) tea.Cmd {
+	m.sessionBack = back
+	m.stage = sessionsStage
+	m.busy = true
+	m.sessions = nil
+	m.sessionSelected = 0
+	m.message = "Loading sessions…"
+	return m.fetchSessions()
+}
+
+func (m *Model) finishSession() {
+	err := m.store.Delete()
+	m.token = ""
+	m.notes = nil
+	m.projects = nil
+	m.sessions = nil
+	m.activeProject = nil
+	m.inboxList = noteList{}
+	m.inboxStashed = false
+	m.inboxNeedsRefresh = false
+	m.showArchived = false
+	m.stage = emailStage
+	m.focusInput(emailInput)
+	m.message = "Signed out."
+	if err != nil {
+		m.message = "Signed out on the server, but the saved credential could not be removed. Remove it from your credential store before restarting."
+	}
+}
+
 func (m Model) loadInbox(token string, save bool) tea.Cmd {
 	return func() tea.Msg {
 		var saveErr error
@@ -296,11 +359,56 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.token = msg.token
 		m.message = "Checking saved session…"
 		return m, m.loadInbox(msg.token, false)
-	case clearedSession:
+	case sessionsResult:
 		m.busy = false
 		if msg.err != nil {
-			m.message = "Could not remove the old saved session; it may reopen on next launch."
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				m.finishSession()
+				if m.message == "Signed out." {
+					m.message = "Session expired. Sign in again."
+				}
+				return m, nil
+			}
+			m.message = "Could not load sessions. Press r to retry or Esc to return."
+			return m, nil
 		}
+		m.sessions = msg.sessions
+		if m.sessionSelected >= len(m.sessions) {
+			m.sessionSelected = max(0, len(m.sessions)-1)
+		}
+		m.message = ""
+		return m, nil
+	case sessionActionResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				m.finishSession()
+				if m.message == "Signed out." {
+					m.message = "Session expired. Sign in again."
+				}
+				return m, nil
+			}
+			m.stage = sessionsStage
+			m.message = "Action not confirmed. Press r to refresh sessions before retrying."
+			return m, nil
+		}
+		if msg.action == logout || msg.action == revokeAll || (msg.action == revokeOne && m.currentSessionID() == msg.id) {
+			m.finishSession()
+			return m, nil
+		}
+		m.stage = sessionsStage
+		for i, item := range m.sessions {
+			if item.ID == msg.id {
+				m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+				if m.sessionSelected >= len(m.sessions) && m.sessionSelected > 0 {
+					m.sessionSelected--
+				}
+				break
+			}
+		}
+		m.message = "Session revoked."
 		return m, nil
 	case projectsResult:
 		m.busy = false
@@ -739,6 +847,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = projectsStage
 				m.message = ""
 				return m, nil
+			case sessionsStage:
+				m.stage = m.sessionBack
+				m.message = ""
+				return m, nil
+			case sessionConfirmStage:
+				m.stage = sessionsStage
+				m.message = ""
+				return m, nil
 			}
 			m.message = ""
 			return m, nil
@@ -818,6 +934,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			switch msg.String() {
+			case "s":
+				return m, m.openSessions(inboxStage)
 			case "p":
 				if m.activeProject != nil {
 					m.activeProject = nil
@@ -861,21 +979,6 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "q":
 				return m, tea.Quit
-			case "s":
-				m.stage = emailStage
-				m.token = ""
-				m.notes = nil
-				m.activeProject = nil
-				m.projects = nil
-				m.projectSelected = 0
-				m.showArchived = false
-				m.inboxList = noteList{}
-				m.inboxStashed = false
-				m.inboxNeedsRefresh = false
-				m.busy = true
-				m.message = "Removing saved session…"
-				m.focusInput(emailInput)
-				return m, func() tea.Msg { return clearedSession{m.store.Delete()} }
 			case "r":
 				m.busy = true
 				return m, m.loadInbox(m.token, false)
@@ -993,6 +1096,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case projectsStage:
 			switch msg.String() {
+			case "s":
+				return m, m.openSessions(projectsStage)
 			case "j", "down":
 				if m.projectSelected+1 < len(m.projects) {
 					m.projectSelected++
@@ -1112,6 +1217,60 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		case sessionsStage:
+			switch msg.String() {
+			case "j", "down":
+				if m.sessionSelected+1 < len(m.sessions) {
+					m.sessionSelected++
+				}
+			case "k", "up":
+				if m.sessionSelected > 0 {
+					m.sessionSelected--
+				}
+			case "r":
+				m.busy = true
+				m.message = "Loading sessions…"
+				return m, m.fetchSessions()
+			case "x":
+				if len(m.sessions) > 0 {
+					m.sessionID = m.sessions[m.sessionSelected].ID
+					m.sessionAction = revokeOne
+					m.stage = sessionConfirmStage
+					m.message = ""
+				}
+			case "a":
+				m.sessionAction = revokeAll
+				m.stage = sessionConfirmStage
+				m.message = ""
+			case "l":
+				m.sessionAction = logout
+				m.stage = sessionConfirmStage
+				m.message = ""
+			}
+			return m, nil
+		case sessionConfirmStage:
+			switch msg.String() {
+			case "n":
+				m.stage = sessionsStage
+				return m, nil
+			case "y":
+				action, id, token := m.sessionAction, m.sessionID, m.token
+				m.busy = true
+				m.message = "Updating sessions…"
+				return m, func() tea.Msg {
+					var err error
+					switch action {
+					case revokeOne:
+						err = m.api.RevokeSession(context.Background(), token, id)
+					case revokeAll:
+						err = m.api.RevokeAllSessions(context.Background(), token)
+					case logout:
+						err = m.api.Logout(context.Background(), token)
+					}
+					return sessionActionResult{action, id, err}
+				}
+			}
+			return m, nil
 		}
 	}
 	if (m.stage <= profileStage || m.stage == newProjectStage) && !m.busy {
@@ -1200,6 +1359,15 @@ func (m Model) listTitle() string {
 
 func (m Model) archivedProject() bool {
 	return m.activeProject != nil && m.activeProject.ArchivedAt != nil
+}
+
+func (m Model) currentSessionID() string {
+	for _, session := range m.sessions {
+		if session.Current {
+			return session.ID
+		}
+	}
+	return ""
 }
 
 func (m *Model) closeEditor(message string) {
@@ -1369,9 +1537,9 @@ func (m Model) View() string {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of %s", len(m.notes), m.listTitle())))
 		}
 		if m.archivedProject() {
-			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · Esc back · q quit")
+			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · s sessions · Esc back · q quit")
 		} else {
-			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sign in · q quit")
+			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sessions · q quit")
 		}
 	case readingStage:
 		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n"
@@ -1427,10 +1595,50 @@ func (m Model) View() string {
 			body += fmt.Sprintf("%s%s\n", mark, preview(m.projects[i].Name, max(12, m.innerWidth()-6)))
 		}
 		if m.showArchived {
-			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · r refresh · Esc Inbox · q quit")
+			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · s sessions · r refresh · Esc Inbox · q quit")
 		} else {
-			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · r refresh · Esc Inbox · q quit")
+			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · s sessions · r refresh · Esc Inbox · q quit")
 		}
+	case sessionsStage:
+		body = "Sessions\n\n"
+		if len(m.sessions) == 0 && !m.busy && m.message == "" {
+			body += "No active sessions.\n"
+		}
+		rows := max(3, m.height-12)
+		start := max(0, m.sessionSelected-rows+1)
+		for i := start; i < len(m.sessions) && i < start+rows; i++ {
+			s := m.sessions[i]
+			mark := "  "
+			if i == m.sessionSelected {
+				mark = "› "
+			}
+			label := safeText(s.DeviceLabel)
+			if label == "" {
+				label = safeText(s.UserAgent)
+			}
+			if label == "" {
+				label = "Unknown device"
+			}
+			if s.Current {
+				label += " (this device)"
+			}
+			body += mark + preview(label, max(12, m.innerWidth()-5)) + "\n"
+			body += "    Last used " + s.LastUsedAt.Local().Format("Jan 02, 2006 15:04") + "\n"
+		}
+		body += "\n" + dimStyle.Render("j/k select · x revoke selected · a revoke all · l log out here · r refresh · Esc back")
+	case sessionConfirmStage:
+		switch m.sessionAction {
+		case revokeOne:
+			body = "Revoke this session?"
+			if m.sessionID == m.currentSessionID() {
+				body += " This will sign you out here."
+			}
+		case revokeAll:
+			body = "Revoke all sessions? Every device, including this one, will be signed out."
+		case logout:
+			body = "Log out of this device? The server session will be revoked."
+		}
+		body += "\n\n" + dimStyle.Render("y confirm · n or Esc cancel")
 	case newProjectStage:
 		body = "New project\n\nName\n" + m.inputs[projectNameInput].View() + "\n\n" + dimStyle.Render("Enter create · Esc cancel")
 	case moveStage:

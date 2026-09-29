@@ -13,26 +13,32 @@ import (
 )
 
 type fakeAPI struct {
-	starts    int
-	verifies  int
-	restores  int
-	name      string
-	zone      string
-	meErr     error
-	inboxErr  error
-	notes     []api.Note
-	next      *string
-	pages     map[string]api.NotesPage
-	pageErr   error
-	requested []string
-	createErr error
-	created   []string
-	updateErr error
-	updated   []string
-	deleteErr error
-	deleted   []string
-	moveErr   error
-	moved     []string
+	sessionList    []api.Session
+	sessionErr     error
+	actionErr      error
+	logoutCalls    int
+	revokeCalls    []string
+	revokeAllCalls int
+	starts         int
+	verifies       int
+	restores       int
+	name           string
+	zone           string
+	meErr          error
+	inboxErr       error
+	notes          []api.Note
+	next           *string
+	pages          map[string]api.NotesPage
+	pageErr        error
+	requested      []string
+	createErr      error
+	created        []string
+	updateErr      error
+	updated        []string
+	deleteErr      error
+	deleted        []string
+	moveErr        error
+	moved          []string
 
 	projectList      []api.Project
 	archivedList     []api.Project
@@ -49,6 +55,19 @@ type fakeAPI struct {
 	projectPageErr   error
 	projectRequested []string
 	projectCreated   []string
+}
+
+func (f *fakeAPI) Sessions(_ context.Context, _ string) ([]api.Session, error) {
+	return f.sessionList, f.sessionErr
+}
+func (f *fakeAPI) Logout(_ context.Context, _ string) error { f.logoutCalls++; return f.actionErr }
+func (f *fakeAPI) RevokeSession(_ context.Context, _, id string) error {
+	f.revokeCalls = append(f.revokeCalls, id)
+	return f.actionErr
+}
+func (f *fakeAPI) RevokeAllSessions(_ context.Context, _ string) error {
+	f.revokeAllCalls++
+	return f.actionErr
 }
 
 type fakeStore struct {
@@ -1047,6 +1066,128 @@ func TestMoveTargetsRemainActiveWhenViewingArchivedProjects(t *testing.T) {
 	m = next.(Model)
 	if len(m.moveTargets) != 1 || m.moveTargets[0].id != "active" || m.projects[0].ID != "archived" {
 		t.Fatal("archived project leaked into move targets or changed archived list")
+	}
+}
+
+func TestSessionsRevokeRemoteAndLogout(t *testing.T) {
+	f := &fakeAPI{sessionList: []api.Session{{ID: "here", DeviceLabel: "Laptop", Current: true}, {ID: "there", DeviceLabel: "Phone"}}}
+	store := &fakeStore{token: "token"}
+	m := New(f, store)
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if m.stage != sessionsStage || cmd == nil {
+		t.Fatal("sessions did not open")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if len(m.sessions) != 2 || !strings.Contains(m.View(), "this device") {
+		t.Fatal("current session not displayed")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if len(f.revokeCalls) != 0 || m.stage != sessionsStage {
+		t.Fatal("cancel revoked session")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(f.revokeCalls) != 1 || f.revokeCalls[0] != "there" || len(m.sessions) != 1 || m.stage != sessionsStage || store.deletes != 0 {
+		t.Fatal("remote revoke failed or signed out current device")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if f.logoutCalls != 1 || m.stage != emailStage || m.token != "" || store.deletes != 1 {
+		t.Fatal("logout did not revoke and clear credential")
+	}
+}
+
+func TestSessionsRevokeAllAndFailures(t *testing.T) {
+	f := &fakeAPI{sessionList: []api.Session{{ID: "here", Current: true}}, actionErr: errors.New("offline")}
+	store := &fakeStore{token: "token"}
+	m := New(f, store)
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != sessionsStage || m.token != "token" || store.deletes != 0 || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("failed revoke-all lost session")
+	}
+	f.actionErr = nil
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || m.token != "" || store.deletes != 1 || f.revokeAllCalls != 2 {
+		t.Fatal("revoke-all did not sign out")
+	}
+}
+
+func TestRevokeCurrentSessionSignsOut(t *testing.T) {
+	f := &fakeAPI{sessionList: []api.Session{{ID: "here", Current: true}}}
+	store := &fakeStore{token: "token"}
+	m := New(f, store)
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if !strings.Contains(m.View(), "sign you out") {
+		t.Fatal("missing current device warning")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || store.deletes != 1 || m.token != "" {
+		t.Fatal("revoke current did not sign out")
+	}
+}
+
+func TestSessionsLoadFailureCanRetryOrReturn(t *testing.T) {
+	f := &fakeAPI{sessionErr: errors.New("offline")}
+	m := New(f, &fakeStore{token: "token"})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != sessionsStage || !strings.Contains(m.View(), "Could not load") {
+		t.Fatal("session load failure not visible")
+	}
+	f.sessionErr = nil
+	f.sessionList = []api.Session{{ID: "here", Current: true}}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.sessions) != 1 || m.busy {
+		t.Fatal("session retry failed")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != inboxStage || m.token != "token" {
+		t.Fatal("return from sessions lost sign-in")
+	}
+}
+
+func TestSessionActionUnauthorizedClearsCredential(t *testing.T) {
+	f := &fakeAPI{sessionList: []api.Session{{ID: "other"}}, actionErr: &api.Error{Status: 401, Code: "unauthorized"}}
+	store := &fakeStore{token: "token"}
+	m := New(f, store)
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || m.token != "" || store.deletes != 1 {
+		t.Fatal("unauthorized session action retained credential")
 	}
 }
 
