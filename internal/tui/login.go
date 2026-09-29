@@ -23,7 +23,7 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearTelegram()
 		m.stage = m.telegramBack
 		m.busy = false
-		m.message = "Telegram sign-in cancelled."
+		m.setStatus(statusInfo, "Telegram sign-in cancelled.")
 		return m, nil
 	}
 	if m.busy {
@@ -52,7 +52,7 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stage = loginStage
 			m.loginForm = nil
 		}
-		m.message = ""
+		m.clearStatus()
 		return m, nil
 	}
 	switch m.stage {
@@ -65,7 +65,8 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case restoreStage:
 		switch strings.ToLower(msg.String()) {
 		case "y":
-			m.busy, m.message = true, ""
+			m.busy = true
+			m.setStatus(statusInfo, "Restoring account…")
 			ticket, telegram := m.ticket, m.telegramLogin
 			return m, func() tea.Msg {
 				var token string
@@ -80,12 +81,13 @@ func (m Model) updateLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.clearTelegram()
 			m.stage = loginStage
-			m.message = "Restoration cancelled."
+			m.setStatus(statusInfo, "Restoration cancelled.")
 		}
 		return m, nil
 	case telegramStage:
 		switch msg.String() {
 		case "r":
+			m.setStatus(statusInfo, "Checking Telegram approval…")
 			return m, m.pollTelegram("", "")
 		case "o":
 			id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
@@ -105,12 +107,13 @@ func (m *Model) clearTelegram() {
 	m.telegramSecret = ""
 	m.telegramURL = ""
 	m.telegramExpires = time.Time{}
+	m.telegramBrowserFailed = false
 	m.telegramGeneration++
 	m.ticket = ""
 }
 
 func (m *Model) openEmail() tea.Cmd {
-	m.message = ""
+	m.clearStatus()
 	return m.showLoginForm(emailStage)
 }
 
@@ -118,7 +121,7 @@ func (m *Model) startTelegram(back stage) tea.Cmd {
 	m.clearTelegram()
 	m.telegramBack = back
 	m.busy = true
-	m.message = "Starting Telegram sign-in…"
+	m.setStatus(statusInfo, "Starting Telegram sign-in…")
 	return func() tea.Msg {
 		start, err := m.api.StartTelegram(context.Background())
 		return telegramStartResult{start, err}
@@ -133,12 +136,11 @@ func (m Model) telegramTimer() tea.Cmd {
 
 func (m *Model) pollTelegram(name, zone string) tea.Cmd {
 	if !time.Now().Before(m.telegramExpires) {
-		m.message = "Telegram attempt expired. Press Esc then choose 2 to start again."
+		m.setStatus(statusError, "Telegram attempt expired. Esc, then 2 to start again.")
 		return nil
 	}
 	m.busy = true
 	m.telegramGeneration++
-	m.message = "Checking Telegram approval…"
 	id, secret := m.telegramAttempt, m.telegramSecret
 	return func() tea.Msg {
 		result, err := m.api.PollTelegram(context.Background(), id, secret, name, zone)
@@ -149,7 +151,8 @@ func (m *Model) pollTelegram(name, zone string) tea.Cmd {
 // verify dispatches an email code check. Huh forms call it once the code
 // (and profile, for new accounts) validates.
 func (m *Model) verify(code, name, zone string) tea.Cmd {
-	m.busy, m.message = true, "Verifying sign-in…"
+	m.busy = true
+	m.setStatus(statusInfo, "Verifying sign-in…")
 	challenge := m.challenge
 	return func() tea.Msg {
 		result, err := m.api.VerifyEmail(context.Background(), challenge, code, name, zone)
@@ -172,6 +175,7 @@ func (m *Model) signedIn(token string) tea.Cmd {
 	m.inboxNeedsRefresh = false
 	m.stage = inboxStage
 	m.busy = true
+	m.status.clear()
 	m.message = "Loading Inbox…"
 	return m.loadInbox(token, true)
 }

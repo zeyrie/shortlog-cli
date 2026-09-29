@@ -16,7 +16,7 @@ func (m Model) loginBody() string {
 		return m.centerOver("Sign in with email", lipgloss.Width(form)) + "\n\n" + form
 	case telegramStage:
 		body := titleStyle.Render("Sign in with Telegram") + "\n\nApprove access in your browser. This attempt expires in about 10 minutes."
-		if strings.Contains(m.message, "Could not open the browser") {
+		if m.telegramBrowserFailed {
 			body += "\n\nOpen manually: " + safeText(m.telegramURL)
 		}
 		return body
@@ -75,71 +75,40 @@ func cropVisible(block string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) loginHelp() string {
-	var full, short, tiny string
-	switch m.stage {
-	case emailStage:
-		full, short, tiny = "Enter send code · Esc login options · Ctrl+C quit", "Enter send code · Esc back", "Enter continue · Esc back"
-	case codeStage:
-		full, short, tiny = "Enter verify · Esc change email · Ctrl+C quit", "Enter verify · Esc back", "Enter verify · Esc back"
-	case profileStage:
-		full, short, tiny = "Enter next/save · Tab switch field · Esc cancel", "Enter next · Tab switch · Esc back", "Enter next · Esc back"
-	case telegramStage:
-		full, short, tiny = "r check now · o reopen browser · Esc cancel", "r check now · o browser · Esc cancel", "r check · Esc cancel"
-	}
-	switch {
-	case m.width >= lipgloss.Width(full):
-		return full
-	case m.width >= lipgloss.Width(short):
-		return short
-	}
-	return tiny
-}
-
 func (m Model) loginWordmark() string {
-	if m.width >= lipgloss.Width(smallLoginLogo)+4 && m.height >= 12 {
+	if m.width >= lipgloss.Width(smallLoginLogo)+4 && m.bodyHeight() >= 12 {
 		return smallLoginLogo
 	}
 	return "SHORTLOG"
 }
 
-// loginView renders the provider selection screen.
+// loginView renders the provider selection screen. Shortcuts and transient
+// messages live in the footer; only a notice carried over from another screen
+// (such as a scheduled deletion) is shown here.
 func (m Model) loginView() string {
+	height := m.bodyHeight()
 	logo := "SHORTLOG"
 	switch {
-	case m.width >= lipgloss.Width(largeLoginLogo)+4 && m.height >= 18:
+	case m.width >= lipgloss.Width(largeLoginLogo)+4 && height >= 18:
 		logo = largeLoginLogo
-	case m.width >= lipgloss.Width(smallLoginLogo)+4 && m.height >= 12:
+	case m.width >= lipgloss.Width(smallLoginLogo)+4 && height >= 12:
 		logo = smallLoginLogo
 	}
 	heading := titleStyle.Render(logo)
 	if logo != "SHORTLOG" {
 		heading = renderLogo(logo)
 	}
-	if m.height >= 16 {
+	if height >= 16 {
 		heading = lipgloss.JoinVertical(lipgloss.Center, heading, "", dimStyle.Italic(true).Render("A quiet place for your notes"))
-	}
-	help := "↑/↓ or j/k select · Enter continue · 1/2 choose · q quit"
-	if m.width < 59 {
-		help = "j/k select · Enter · 1/2 direct · q quit"
-	}
-	if m.width < 40 {
-		help = "Enter select · 1/2 direct"
-	}
-	if m.width < 27 {
-		help = "1/2 choose"
 	}
 	options := m.loginMenu()
 	rows := []loginRow{{text: heading, center: true}, {text: "", center: true}, {text: options, center: true}}
-	if m.message == "" || max(1, m.height) >= 16 {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: renderHelp(help), center: true})
-	}
 	if m.message != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginStatus(), center: true})
+		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
 	}
 	content := composeRows(rows)
-	if lipgloss.Height(content) > max(1, m.height) && m.message != "" {
-		content = composeRows([]loginRow{{text: options, center: true}, {text: m.loginStatus(), center: true}})
+	if lipgloss.Height(content) > height && m.message != "" {
+		content = composeRows([]loginRow{{text: options, center: true}, {text: m.loginNotice(), center: true}})
 	}
 	return m.centerLogin(content)
 }
@@ -176,6 +145,7 @@ func composeRows(rows []loginRow) string {
 // loginStepView renders a provider step (email, code, profile, Telegram, or
 // restoration) with the same centered composition as the welcome screen.
 func (m Model) loginStepView() string {
+	height := m.bodyHeight()
 	body := m.loginBody()
 	prose := m.stage == telegramStage || m.stage == restoreStage
 	wordmark := titleStyle.Render(m.loginWordmark())
@@ -183,48 +153,40 @@ func (m Model) loginStepView() string {
 		wordmark = renderLogo(m.loginWordmark())
 	}
 	rows := []loginRow{{text: wordmark, center: true}, {text: "", center: true}, {text: body, center: !prose}}
-	if help := m.loginHelp(); help != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: renderHelp(help), center: true})
-	}
 	if m.message != "" {
-		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginStatus(), center: true})
+		rows = append(rows, loginRow{text: "", center: true}, loginRow{text: m.loginNotice(), center: true})
 	}
-	// On short terminals drop the wordmark first, then the status panel.
-	if max(1, m.height) < 16 {
+	// On short terminals drop the wordmark first, then the notice.
+	if height < 16 {
 		rows = rows[2:]
 	}
 	content := composeRows(rows)
-	if lipgloss.Height(content) > max(1, m.height) && len(rows) > 2 {
+	if lipgloss.Height(content) > height && len(rows) > 2 {
 		content = composeRows(rows[2:])
 	}
-	if lipgloss.Height(content) > max(1, m.height) && m.message != "" {
+	if lipgloss.Height(content) > height && m.message != "" {
 		content = composeRows([]loginRow{{text: body, center: !prose}})
 	}
 	return m.centerLogin(content)
 }
 
-// centerLogin clamps the composition to the terminal and centers it, so no
-// part of a sign-in step can spill past the right edge.
+// centerLogin clamps the composition to the space above the footer and
+// centers it, so no part of a sign-in step can spill past an edge.
 func (m Model) centerLogin(content string) string {
-	width, height := max(1, m.width), max(1, m.height)
+	width, height := max(1, m.width), m.bodyHeight()
 	content = lipgloss.NewStyle().MaxWidth(width).Render(content)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
-func (m Model) loginStatus() string {
-	issue := strings.Contains(m.message, "Could not") || strings.Contains(m.message, "expired") || strings.Contains(m.message, "unavailable") || strings.Contains(m.message, "unsafe")
-	label, color := "STATUS", lipgloss.Color("6")
-	if issue {
-		label, color = "SIGN-IN ISSUE", lipgloss.Color("9")
-	}
+// loginNotice frames a message carried over from a screen that has not moved
+// to the status line yet. Those are notices the user must read, such as a
+// deletion deadline, so they get a panel rather than the one-line footer.
+func (m Model) loginNotice() string {
 	width := min(54, max(1, m.width-4))
-	if max(1, m.height) < 16 {
-		return lipgloss.NewStyle().Width(width).Foreground(color).Render(label + ": " + safeText(m.message))
+	if m.bodyHeight() < 16 {
+		return lipgloss.NewStyle().Width(width).Foreground(lipgloss.Color("6")).Render(safeText(m.message))
 	}
-	text := lipgloss.NewStyle().Width(max(1, width-4)).Render(safeText(m.message))
-	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(color).Render(
-		lipgloss.JoinVertical(lipgloss.Left, lipgloss.NewStyle().Bold(true).Foreground(color).Render(label), text),
-	)
+	return lipgloss.NewStyle().Width(width).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Render(safeText(m.message))
 }
 
 var (
@@ -232,27 +194,12 @@ var (
 	menuRailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
-// renderHelp styles a "key action · key action" hint line: keys stand out,
-// actions and separators recede. The plain text, and so its width, is unchanged.
-func renderHelp(help string) string {
-	parts := strings.Split(help, " · ")
-	for i, part := range parts {
-		key, action, found := strings.Cut(part, " ")
-		if !found {
-			parts[i] = helpKeyStyle.Render(key)
-			continue
-		}
-		parts[i] = helpKeyStyle.Render(key) + dimStyle.Render(" "+action)
-	}
-	return strings.Join(parts, dimStyle.Render(" · "))
-}
-
 // loginMenu renders the provider choices. The list model still owns selection
 // and key handling; this only draws it. The selected choice gets an accent
 // rail, and roomy terminals show a one-line hint under each choice.
 func (m Model) loginMenu() string {
 	hints := []string{"We'll email you an 8-digit code", "Approve sign-in in your browser"}
-	detailed := m.width >= 40 && m.height >= 16
+	detailed := m.width >= 40 && m.bodyHeight() >= 16
 	var rows []string
 	for i, item := range m.loginOptions.Items() {
 		number, label, _ := strings.Cut(item.(loginOption).label, "  ")

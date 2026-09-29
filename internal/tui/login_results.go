@@ -12,7 +12,7 @@ func (m Model) onLoadedSession(msg loadedSession) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.stage, m.busy = loginStage, false
 		m.inputs[m.focus].Blur()
-		m.message = "Credential store unavailable. Sign in; this session may not be saved."
+		m.setStatus(statusWarn, "Credential store unavailable; this session may not be saved.")
 		return m, nil
 	}
 	if msg.token == "" {
@@ -32,16 +32,16 @@ func (m Model) onTelegramStart(msg telegramStartResult) (tea.Model, tea.Cmd) {
 		m.stage = m.telegramBack
 		var apiErr *api.Error
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
-			m.message = "Telegram sign-in unavailable. Configure Telegram on the server or use email."
+			m.setStatus(statusError, "Telegram sign-in unavailable on this server. Use email.")
 		} else {
-			m.message = friendlyError(msg.err, "Could not start Telegram sign-in.")
+			m.setStatus(statusError, friendlyError(msg.err, "Could not start Telegram sign-in."))
 		}
 		return m, nil
 	}
 	if !validTelegramURL(msg.start.AuthorizationURL) {
 		m.clearTelegram()
 		m.stage = m.telegramBack
-		m.message = "Server returned an unsafe Telegram sign-in URL. Sign-in was cancelled."
+		m.setStatus(statusError, "Server sent an unsafe Telegram URL; sign-in cancelled.")
 		return m, nil
 	}
 	m.telegramLogin = true
@@ -50,7 +50,7 @@ func (m Model) onTelegramStart(msg telegramStartResult) (tea.Model, tea.Cmd) {
 	m.telegramURL = msg.start.AuthorizationURL
 	m.telegramExpires = time.Now().Add(10 * time.Minute)
 	m.stage = telegramStage
-	m.message = "Approve sign-in in your browser; this screen checks automatically."
+	m.setStatus(statusInfo, "Waiting for Telegram approval…")
 	id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
 	return m, tea.Batch(m.telegramTimer(), func() tea.Msg {
 		return telegramBrowserResult{id, opener(address)}
@@ -58,8 +58,11 @@ func (m Model) onTelegramStart(msg telegramStartResult) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) onTelegramBrowser(msg telegramBrowserResult) (tea.Model, tea.Cmd) {
-	if m.stage == telegramStage && m.telegramAttempt == msg.attempt && msg.err != nil {
-		m.message = "Could not open the browser. Press o to retry, or copy the URL below into your browser."
+	if m.stage == telegramStage && m.telegramAttempt == msg.attempt {
+		m.telegramBrowserFailed = msg.err != nil
+		if msg.err != nil {
+			m.setStatus(statusError, "Could not open the browser. Copy the URL above, or press o.")
+		}
 	}
 	return m, nil
 }
@@ -79,35 +82,35 @@ func (m Model) onTelegramPoll(msg telegramPollResult) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var apiErr *api.Error
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-			m.message = "New Telegram account: enter a name and IANA time zone."
+			m.setStatus(statusInfo, "New Telegram account: add a name and time zone.")
 			return m, m.showLoginForm(profileStage)
 		}
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
 			if m.stage == profileStage {
-				m.message = "Server rejected the profile or attempt. Check your details; if expired, press Esc and start again."
+				m.setStatus(statusError, "Profile or attempt rejected. Check details, or Esc to restart.")
 				return m, nil
 			} else {
-				m.message = "Telegram attempt expired or invalid. Press Esc then choose 2 to start again."
+				m.setStatus(statusError, "Telegram attempt expired. Esc, then 2 to start again.")
 			}
 		} else if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
-			m.message = "Telegram sign-in is temporarily unavailable. Press r to retry or Esc to cancel."
+			m.setStatus(statusWarn, "Telegram is temporarily unavailable. Press r to retry.")
 		} else {
-			m.message = friendlyError(msg.err, "Could not check Telegram approval.") + " Press r to retry."
+			m.setStatus(statusError, friendlyError(msg.err, "Could not check Telegram approval."))
 		}
 		return m, nil
 	}
 	switch msg.result.Status {
 	case "pending":
 		if m.stage == profileStage {
-			m.message = "Still waiting for Telegram approval. Press Enter to check again."
+			m.setStatus(statusInfo, "Still waiting for Telegram approval. Enter checks again.")
 			return m, nil
 		}
-		m.message = "Waiting for Telegram approval… Press r to check now or Esc to cancel."
+		m.setStatus(statusInfo, "Waiting for Telegram approval…")
 		return m, m.telegramTimer()
 	case "restore_required":
 		m.stage = restoreStage
 		m.ticket = msg.result.RecoveryTicket
-		m.message = ""
+		m.clearStatus()
 		return m, nil
 	case "signed_in":
 		m.clearTelegram()
@@ -119,12 +122,12 @@ func (m Model) onTelegramPoll(msg telegramPollResult) (tea.Model, tea.Cmd) {
 func (m Model) onEmailStart(msg startResult) (tea.Model, tea.Cmd) {
 	m.busy = false
 	if msg.err != nil {
-		m.message = friendlyError(msg.err, "Could not send a code.")
+		m.setStatus(statusError, friendlyError(msg.err, "Could not send a code."))
 		return m, nil
 	}
 	m.challenge = msg.id
 	m.loginValues.code = ""
-	m.message = "Check your email. The code expires in 10 minutes."
+	m.setStatus(statusInfo, "Code sent. It expires in 10 minutes.")
 	return m, m.showLoginForm(codeStage)
 }
 
@@ -133,18 +136,18 @@ func (m Model) onEmailVerify(msg verifyResult) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var apiErr *api.Error
 		if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-			m.message = "New account: enter a name and IANA time zone, then verify again."
+			m.setStatus(statusInfo, "New account: add a name and time zone to finish.")
 			return m, m.showLoginForm(profileStage)
 		}
 		// The code or profile form stays open with its values for a retry.
-		m.message = friendlyError(msg.err, "Could not verify the code.")
+		m.setStatus(statusError, friendlyError(msg.err, "Could not verify the code."))
 		return m, nil
 	}
 	if msg.result.Status == "restore_required" {
 		m.stage = restoreStage
 		m.ticket = msg.result.RecoveryTicket
 		m.loginValues.code = ""
-		m.message = ""
+		m.clearStatus()
 	} else {
 		return m, m.signedIn(msg.result.Token)
 	}
@@ -156,9 +159,9 @@ func (m Model) onRestore(msg restoreResult) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var apiErr *api.Error
 		if m.telegramLogin && errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
-			m.message = "Telegram restoration expired or was already used. Press Esc then choose 2 to start again."
+			m.setStatus(statusError, "Telegram restore expired or was used. Esc, then 2 to restart.")
 		} else {
-			m.message = friendlyError(msg.err, "Could not restore the account.")
+			m.setStatus(statusError, friendlyError(msg.err, "Could not restore the account."))
 		}
 	} else {
 		m.clearTelegram()

@@ -159,7 +159,8 @@ func (m Model) dispatchLogin() (tea.Model, tea.Cmd) {
 	case emailStage:
 		m.clearTelegram()
 		address := strings.TrimSpace(m.loginValues.email)
-		m.email, m.busy, m.message = address, true, "Sending email code…"
+		m.email, m.busy = address, true
+		m.setStatus(statusInfo, "Sending email code…")
 		return m, func() tea.Msg {
 			id, err := m.api.StartEmail(context.Background(), address)
 			return startResult{id, err}
@@ -170,6 +171,7 @@ func (m Model) dispatchLogin() (tea.Model, tea.Cmd) {
 	case profileStage:
 		name := strings.TrimSpace(m.loginValues.name)
 		if m.telegramLogin {
+			m.setStatus(statusInfo, "Checking Telegram approval…")
 			cmd := m.pollTelegram(name, m.loginValues.zone)
 			return m, cmd
 		}

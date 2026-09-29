@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -17,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"shortlog-cli/internal/api"
 )
 
@@ -104,65 +106,69 @@ type noteList struct {
 }
 
 type Model struct {
-	api                emailAPI
-	store              sessionStore
-	stage              stage
-	inputs             [4]textinput.Model
-	focus              int
-	loginForm          *huh.Form
-	loginValues        *loginFormValues
-	challenge          string
-	ticket             string
-	telegramLogin      bool
-	telegramAttempt    string
-	telegramSecret     string
-	telegramURL        string
-	telegramExpires    time.Time
-	telegramGeneration uint64
-	telegramBack       stage
-	openBrowser        func(string) error
-	token              string // Never rendered or logged.
-	email              string
-	username           string
-	account            api.Account
-	accountBack        stage
-	accountStartName   string
-	accountStartZone   string
-	notes              []api.Note
-	inboxList          noteList
-	activeProject      *api.Project
-	inboxStashed       bool
-	inboxNeedsRefresh  bool
-	projects           []api.Project
-	projectSelected    int
-	showArchived       bool
-	archiveID          string
-	sessions           []api.Session
-	sessionSelected    int
-	sessionBack        stage
-	sessionAction      sessionAction
-	sessionID          string
-	nextCursor         string
-	selected           int
-	loginOptions       list.Model
-	reader             viewport.Model
-	draft              textarea.Model
-	editorID           string
-	editorStart        string
-	editorBack         stage
-	deleteID           string
-	deleteBack         stage
-	moveID             string
-	moveBack           stage
-	moveTargets        []moveTarget
-	moveSelected       int
-	quitAfterDiscard   bool
-	resumeDraft        bool
-	selectID           string
-	busy               bool
-	message            string
-	width              int
-	height             int
+	api                   emailAPI
+	store                 sessionStore
+	stage                 stage
+	inputs                [4]textinput.Model
+	focus                 int
+	status                statusBar
+	help                  help.Model
+	origin                string // API origin, shown in the status line
+	loginForm             *huh.Form
+	loginValues           *loginFormValues
+	challenge             string
+	ticket                string
+	telegramLogin         bool
+	telegramBrowserFailed bool
+	telegramAttempt       string
+	telegramSecret        string
+	telegramURL           string
+	telegramExpires       time.Time
+	telegramGeneration    uint64
+	telegramBack          stage
+	openBrowser           func(string) error
+	token                 string // Never rendered or logged.
+	email                 string
+	username              string
+	account               api.Account
+	accountBack           stage
+	accountStartName      string
+	accountStartZone      string
+	notes                 []api.Note
+	inboxList             noteList
+	activeProject         *api.Project
+	inboxStashed          bool
+	inboxNeedsRefresh     bool
+	projects              []api.Project
+	projectSelected       int
+	showArchived          bool
+	archiveID             string
+	sessions              []api.Session
+	sessionSelected       int
+	sessionBack           stage
+	sessionAction         sessionAction
+	sessionID             string
+	nextCursor            string
+	selected              int
+	loginOptions          list.Model
+	reader                viewport.Model
+	draft                 textarea.Model
+	editorID              string
+	editorStart           string
+	editorBack            stage
+	deleteID              string
+	deleteBack            stage
+	moveID                string
+	moveBack              stage
+	moveTargets           []moveTarget
+	moveSelected          int
+	quitAfterDiscard      bool
+	resumeDraft           bool
+	selectID              string
+	busy                  bool
+	message               string
+	width                 int
+	height                int
 }
 
 const (
@@ -175,6 +181,10 @@ const (
 func New(client emailAPI, store sessionStore) Model {
 	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14), openBrowser: openTelegramBrowser}
 	m.loginValues = &loginFormValues{}
+	m.help = newHelp()
+	if origin, ok := client.(interface{ Origin() string }); ok {
+		m.origin = origin.Origin()
+	}
 	m.loginOptions = newLoginOptions()
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
@@ -207,7 +217,7 @@ func New(client emailAPI, store sessionStore) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, func() tea.Msg {
+	return tea.Batch(textinput.Blink, statusTick(idleBeat), func() tea.Msg {
 		token, err := m.store.Load()
 		return loadedSession{token, err}
 	})
@@ -438,6 +448,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateLoginForm(msg)
 		}
 		return m, nil
+	case statusBeat:
+		return m, m.status.beat(m.busy, time.Now())
 	case loadedSession:
 		return m.onLoadedSession(msg)
 	case telegramStartResult:
@@ -885,6 +897,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case restoreResult:
 		return m.onRestore(msg)
 	case tea.KeyMsg:
+		m.status.dismiss()
 		if msg.String() == "ctrl+c" {
 			if m.stage == captureStage && !m.busy && m.draft.Value() != m.editorStart {
 				m.stage = discardStage
@@ -1451,6 +1464,57 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// setStatus shows a message on the status line and drops any body message, so
+// the two never disagree about what is current.
+func (m *Model) setStatus(level statusLevel, text string) {
+	m.message = ""
+	m.status.set(level, text, time.Now())
+}
+
+func (m *Model) clearStatus() {
+	m.message = ""
+	m.status.clear()
+}
+
+// footerHeight reserves two rows for shortcuts and status, or only the status
+// row on very short terminals.
+func (m Model) footerHeight() int {
+	if m.height < 8 {
+		return 1
+	}
+	return 2
+}
+
+func (m Model) bodyHeight() int { return max(1, m.height-m.footerHeight()) }
+
+// footer renders the shortcut line above the status line.
+func (m Model) footer() string {
+	status := m.status.view(m.width, m.busy, m.statusContext())
+	if m.footerHeight() == 1 {
+		return status
+	}
+	h := m.help
+	h.Width = max(1, m.width-2*statusGutter)
+	// help drops trailing hints to fit, but when even its ellipsis would not
+	// fit it keeps the next hint anyway; cut the line so it never overflows.
+	line := ansi.Truncate(h.ShortHelpView(m.shortcuts()), h.Width, "…")
+	shortcuts := lipgloss.NewStyle().PaddingLeft(statusGutter).Render(line)
+	return shortcuts + "\n" + status
+}
+
+// statusContext names who is signed in and where, for the status line's
+// right edge.
+func (m Model) statusContext() string {
+	host := strings.TrimPrefix(strings.TrimPrefix(m.origin, "https://"), "http://")
+	if m.token != "" && m.username != "" {
+		if host == "" {
+			return preview(m.username, 24)
+		}
+		return preview(m.username, 24) + " · " + host
+	}
+	return host
+}
+
 func (m *Model) focusInput(index int) {
 	m.inputs[m.focus].Blur()
 	m.focus = index
@@ -1639,15 +1703,15 @@ var (
 
 func (m Model) View() string {
 	if m.stage == loginStage {
-		return m.loginView()
+		return m.loginView() + "\n" + m.footer()
 	}
 	if isLoginStage(m.stage) {
-		return m.loginStepView()
+		return m.loginStepView() + "\n" + m.footer()
 	}
 	var body string
 	switch m.stage {
 	case startupStage:
-		body = "Checking saved session…\n\n" + dimStyle.Render("Ctrl+C quit")
+		body = "Checking saved session…"
 	case inboxStage:
 		body = m.listTitle()
 		if m.archivedProject() {
@@ -1678,17 +1742,10 @@ func (m Model) View() string {
 		} else if len(m.notes) > 0 {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of %s", len(m.notes), m.listTitle())))
 		}
-		if m.archivedProject() {
-			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · s sessions · g account · Esc back · q quit")
-		} else {
-			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sessions · g account · q quit")
-		}
 	case readingStage:
-		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n"
+		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View()
 		if m.archivedProject() {
-			body += dimStyle.Render("Archived · read-only · ↑/↓ or j/k scroll · Esc back · q quit")
-		} else {
-			body += dimStyle.Render("e edit · v move · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
+			body += "\n\n" + dimStyle.Render("Archived · read-only")
 		}
 	case captureStage:
 		heading := "New note"
@@ -1702,13 +1759,13 @@ func (m Model) View() string {
 		if m.draft.Value() != m.editorStart {
 			status = "unsaved"
 		}
-		body = fmt.Sprintf("%s\n\n%s\n\n%s\n%s", heading, m.draft.View(), dimStyle.Render(fmt.Sprintf("%d / 20,000 characters · %s", utf8.RuneCountInString(m.draft.Value()), status)), dimStyle.Render("Enter new line · Ctrl+S save · Esc back"))
+		body = fmt.Sprintf("%s\n\n%s\n\n%s", heading, m.draft.View(), dimStyle.Render(fmt.Sprintf("%d / 20,000 characters · %s", utf8.RuneCountInString(m.draft.Value()), status)))
 	case discardStage:
 		prompt := "Discard unsaved changes?"
 		if m.quitAfterDiscard {
 			prompt = "Discard unsaved changes and quit?"
 		}
-		body = prompt + "\n\n" + dimStyle.Render("y discard · n or Esc keep editing")
+		body = prompt
 	case deleteStage:
 		title := "this note"
 		for _, note := range m.notes {
@@ -1717,7 +1774,7 @@ func (m Model) View() string {
 				break
 			}
 		}
-		body = "Permanently delete “" + title + "”?\nThere is no Trash and this cannot be undone.\n\n" + dimStyle.Render("y delete permanently · n or Esc cancel")
+		body = "Permanently delete “" + title + "”?\nThere is no Trash and this cannot be undone."
 	case projectsStage:
 		if m.showArchived {
 			body = "Archived projects\n\n"
@@ -1736,11 +1793,6 @@ func (m Model) View() string {
 			}
 			body += fmt.Sprintf("%s%s\n", mark, preview(m.projects[i].Name, max(12, m.innerWidth()-6)))
 		}
-		if m.showArchived {
-			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · s sessions · g account · r refresh · Esc Inbox · q quit")
-		} else {
-			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · s sessions · g account · r refresh · Esc Inbox · q quit")
-		}
 	case accountStage:
 		body = "Account settings\n\n"
 		if m.account.ID != "" {
@@ -1750,13 +1802,12 @@ func (m Model) View() string {
 				body += "Created: " + m.account.CreatedAt.Local().Format("Jan 02, 2006") + "\n"
 			}
 		}
-		body += "\n" + dimStyle.Render("e edit profile · d request deletion · r refresh · Esc back")
 	case accountEditStage:
-		body = "Edit profile\n\nName\n" + m.inputs[accountNameInput].View() + "\n\nIANA time zone\n" + m.inputs[accountZoneInput].View() + "\n\n" + dimStyle.Render("Tab switch · Enter save · Esc back")
+		body = "Edit profile\n\nName\n" + m.inputs[accountNameInput].View() + "\n\nIANA time zone\n" + m.inputs[accountZoneInput].View()
 	case accountDiscardStage:
-		body = "Discard unsaved profile changes?\n\n" + dimStyle.Render("y discard · n or Esc continue editing")
+		body = "Discard unsaved profile changes?"
 	case accountDeleteStage:
-		body = "Schedule account deletion?\n\nAll devices will be signed out immediately. Your projects and notes will become inaccessible. You can restore your account by signing in with the same identity within 30 days. After that, your data is permanently erased by a scheduled job.\n\nType DELETE to confirm:\n" + m.inputs[deletePhraseInput].View() + "\n\n" + dimStyle.Render("Enter request deletion · Esc cancel")
+		body = "Schedule account deletion?\n\nAll devices will be signed out immediately. Your projects and notes will become inaccessible. You can restore your account by signing in with the same identity within 30 days. After that, your data is permanently erased by a scheduled job.\n\nType DELETE to confirm:\n" + m.inputs[deletePhraseInput].View()
 	case sessionsStage:
 		body = "Sessions\n\n"
 		if len(m.sessions) == 0 && !m.busy && m.message == "" {
@@ -1783,7 +1834,6 @@ func (m Model) View() string {
 			body += mark + preview(label, max(12, m.innerWidth()-5)) + "\n"
 			body += "    Last used " + s.LastUsedAt.Local().Format("Jan 02, 2006 15:04") + "\n"
 		}
-		body += "\n" + dimStyle.Render("j/k select · x revoke selected · a revoke all · l log out here · r refresh · Esc back")
 	case sessionConfirmStage:
 		switch m.sessionAction {
 		case revokeOne:
@@ -1796,9 +1846,8 @@ func (m Model) View() string {
 		case logout:
 			body = "Log out of this device? The server session will be revoked."
 		}
-		body += "\n\n" + dimStyle.Render("y confirm · n or Esc cancel")
 	case newProjectStage:
-		body = "New project\n\nName\n" + m.inputs[projectNameInput].View() + "\n\n" + dimStyle.Render("Enter create · Esc cancel")
+		body = "New project\n\nName\n" + m.inputs[projectNameInput].View()
 	case moveStage:
 		body = "Move note from " + m.listTitle() + "\n\n"
 		for _, note := range m.notes {
@@ -1819,7 +1868,6 @@ func (m Model) View() string {
 			}
 			body += mark + preview(m.moveTargets[i].name, max(12, m.innerWidth()-5)) + "\n"
 		}
-		body += "\n" + dimStyle.Render("↑/↓ or j/k select · Enter move · r refresh · Esc cancel")
 	case archiveStage:
 		name := "this project"
 		for _, project := range m.projects {
@@ -1828,15 +1876,15 @@ func (m Model) View() string {
 				break
 			}
 		}
-		body = "Archive “" + name + "”?\nIts notes will stay available, but you cannot edit, move, create, or delete notes in an archived project until it is unarchived.\n\n" + dimStyle.Render("y archive · n or Esc cancel")
+		body = "Archive “" + name + "”?\nIts notes will stay available, but you cannot edit, move, create, or delete notes in an archived project until it is unarchived."
 	}
-	if m.busy {
-		body += "\n\nWorking…"
-	}
+	// Screens not yet moved to the status line keep their message in the
+	// body; many are notices too long or important for a single footer line.
 	if m.message != "" {
 		body += "\n\n" + errStyle.Render(m.message)
 	}
 	content := titleStyle.Render("ShortLog") + "\n\n" + body
-	width := m.contentWidth()
-	return lipgloss.NewStyle().Width(width).Padding(1, 2).Render(content)
+	height := m.bodyHeight()
+	page := lipgloss.NewStyle().Width(m.contentWidth()).Padding(1, 2).Render(content)
+	return lipgloss.NewStyle().Height(height).MaxHeight(height).Render(page) + "\n" + m.footer()
 }

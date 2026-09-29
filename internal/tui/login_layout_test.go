@@ -24,16 +24,17 @@ func TestLoginStepsShareCenteredLandingLayout(t *testing.T) {
 		t.Fatal("expected both screens to render their content")
 	}
 	for name, view := range map[string]string{"landing": stripANSI.ReplaceAllString(landing.View(), ""), "email": stripANSI.ReplaceAllString(email.View(), "")} {
+		body := withoutFooter(view, landing.footerHeight())
 		if height := lipgloss.Height(view); height != 24 {
 			t.Errorf("%s: height %d, want 24", name, height)
 		}
-		left, right := margins(view)
+		left, right := margins(body)
 		if abs(left-right) > 1 {
 			t.Errorf("%s: not horizontally centered, left=%d right=%d", name, left, right)
 		}
 		// Vertically centered: the content block must start below the top row.
-		if leading(view) < 2 {
-			t.Errorf("%s: not vertically centered, starts at row %d", name, leading(view))
+		if leading(body) < 2 {
+			t.Errorf("%s: not vertically centered, starts at row %d", name, leading(body))
 		}
 		for _, line := range strings.Split(view, "\n") {
 			if lipgloss.Width(line) > 80 {
@@ -61,6 +62,13 @@ func margins(view string) (int, int) {
 		}
 	}
 	return left, width - right
+}
+
+// withoutFooter drops the footer rows, which are left-aligned by design, so a
+// layout check sees only the centered sign-in composition above them.
+func withoutFooter(view string, rows int) string {
+	lines := strings.Split(view, "\n")
+	return strings.Join(lines[:max(0, len(lines)-rows)], "\n")
 }
 
 // leading returns the number of blank rows before the first content row.
@@ -140,8 +148,9 @@ func TestLoginFormInputAlignsWithHeading(t *testing.T) {
 		if abs(input.start-heading.start) > 3 {
 			t.Errorf("%dx%d: input starts at column %d, heading at %d", m.width, m.height, input.start, heading.start)
 		}
-		if abs(center(view)-m.width/2) > 2 {
-			t.Errorf("%dx%d: composition center %d, want %d", m.width, m.height, center(view), m.width/2)
+		body := withoutFooter(view, m.footerHeight())
+		if abs(center(body)-m.width/2) > 2 {
+			t.Errorf("%dx%d: composition center %d, want %d", m.width, m.height, center(body), m.width/2)
 		}
 	}
 }
