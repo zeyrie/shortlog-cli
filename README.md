@@ -28,7 +28,9 @@ In the Notes panel (or with a note open), `n` writes a new note in a popup, into
 
 If a save cannot be confirmed (for example, the connection drops), your text stays in the popup or editor; check the note list before retrying to avoid a duplicate. If the session has expired, the CLI signs you out and reopens your unsaved text once you sign in again. `Ctrl+C` asks before quitting if you have unsaved text.
 
-Account actions (editing your profile, revoking sessions, signing out, and deleting your account) return in the next step.
+Focus `[1]` (or press `Enter` there) for your account page. `e` edits your name and IANA time zone (`Tab` switches fields, `Enter` saves). The page lists your sessions with the current device marked: pick one with `j`/`k` and press `x` to revoke it, or `a` to revoke them all; `l` signs out of this device. Each asks for confirmation. Revoking this device's session, revoking all, or signing out clears the saved credential and returns to sign-in.
+
+`D` requests account deletion. The page explains the consequences and requires typing `DELETE` exactly. When accepted, every session is revoked at once and the account can be restored by signing in with the same identity before the deadline shown, 30 days later. After that, the server's scheduled purge permanently erases the account and its data. If a change cannot be confirmed, check your account with `r` before retrying.
 
 To try the workspace without a server, run `go run ./cmd/shortlog -demo`. It opens with sample data, and your changes last until you quit; nothing is sent anywhere.
 

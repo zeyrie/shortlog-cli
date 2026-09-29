@@ -208,3 +208,27 @@ func (d *demoAPI) UnarchiveProject(_ context.Context, _, id string) error {
 	}
 	return &api.Error{Status: 404, Code: "not_found"}
 }
+
+func (d *demoAPI) UpdateProfile(_ context.Context, _, name, zone string) (api.Account, error) {
+	d.account.Username, d.account.TimeZone = name, zone
+	return d.account, nil
+}
+
+// The demo's sessions and deletion succeed without effect; the root starts
+// the demo over when one of them ends the session.
+func (d *demoAPI) RequestAccountDeletion(context.Context, string) (time.Time, error) {
+	return time.Now().Add(30 * 24 * time.Hour), nil
+}
+
+func (d *demoAPI) Logout(context.Context, string) error            { return nil }
+func (d *demoAPI) RevokeAllSessions(context.Context, string) error { return nil }
+
+func (d *demoAPI) RevokeSession(_ context.Context, _, id string) error {
+	for i, s := range d.sessions {
+		if s.ID == id {
+			d.sessions = append(d.sessions[:i:i], d.sessions[i+1:]...)
+			return nil
+		}
+	}
+	return &api.Error{Status: 404, Code: "not_found"}
+}

@@ -124,10 +124,11 @@ func (f *fakeAPI) RevokeAllSessions(_ context.Context, _ string) error {
 }
 
 type fakeStore struct {
-	token   string
-	saveErr error
-	deletes int
-	saves   int
+	token     string
+	saveErr   error
+	deletes   int
+	deleteErr error
+	saves     int
 }
 
 func (s *fakeStore) Load() (string, error) { return s.token, nil }
@@ -138,7 +139,14 @@ func (s *fakeStore) Save(token string) error {
 	}
 	return s.saveErr
 }
-func (s *fakeStore) Delete() error { s.token = ""; s.deletes++; return nil }
+func (s *fakeStore) Delete() error {
+	s.deletes++
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.token = ""
+	return nil
+}
 
 func (f *fakeAPI) StartEmail(_ context.Context, _ string) (string, error) {
 	f.starts++

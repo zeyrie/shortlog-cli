@@ -29,7 +29,7 @@ type popupKind int
 const (
 	confirmPopup popupKind = iota + 1 // a yes/no question
 	menuPopup                         // pick one of several options
-	inputPopup                        // a one-line entry
+	formPopup                         // one or more labelled one-line entries
 	capturePopup                      // a new note
 )
 
@@ -43,20 +43,41 @@ const (
 	moveNoteAction
 	newProjectAction
 	archiveProjectAction
+	editProfileAction
+	revokeSessionAction
+	revokeAllAction
+	signOutAction
+	deleteAccountAction
 	discardEditAction
 	quitAction
 )
 
 // pendingAction is a popup's purpose and what it applies to.
 type pendingAction struct {
-	kind   actionKind
-	source string // the note source a note action applies to
-	noteID string
-	id     string // the project an action applies to
-	name   string // for messages
+	kind    actionKind
+	source  string // the note source a note action applies to
+	noteID  string
+	id      string // the project or session an action applies to
+	name    string // for messages
+	current bool   // a revoked session is this device's
 }
 
 type menuOption struct{ id, label string }
+
+// popupField is one entry of a form popup, checked as the user leaves it and
+// again, with the others, before the form is accepted.
+type popupField struct {
+	label    string
+	input    textinput.Model
+	validate func(string) error
+}
+
+func newField(label, placeholder, value string, limit int, validate func(string) error) popupField {
+	in := textinput.New()
+	in.Placeholder, in.CharLimit, in.Prompt = placeholder, limit, "> "
+	in.SetValue(value)
+	return popupField{label: label, input: in, validate: validate}
+}
 
 type popupOutcome int
 
@@ -79,7 +100,8 @@ type popupState struct {
 	options []menuOption
 	cursor  int
 	window  scrollList // the menu's visible rows; long menus scroll
-	input   textinput.Model
+	fields  []popupField
+	field   int // the focused form field
 	editor  textarea.Model
 	start   string // the capture's text when it opened, to tell if it changed
 	// discarding is set while a changed capture asks whether to throw the
@@ -98,11 +120,11 @@ func newMenu(title string, options []menuOption, action pendingAction) *popupSta
 	return &popupState{kind: menuPopup, title: title, options: options, action: action}
 }
 
-func newInput(title, placeholder string, limit int, action pendingAction) *popupState {
-	in := textinput.New()
-	in.Placeholder, in.CharLimit, in.Prompt = placeholder, limit, "> "
-	in.Focus()
-	return &popupState{kind: inputPopup, title: title, input: in, action: action}
+// newForm opens a form. message, if set, explains what accepting does;
+// accept names the Enter key's action on the last field.
+func newForm(title, message, accept string, danger bool, fields []popupField, action pendingAction) *popupState {
+	fields[0].input.Focus()
+	return &popupState{kind: formPopup, title: title, message: message, accept: accept, danger: danger, fields: fields, action: action}
 }
 
 func newCapture(title, text string, action pendingAction) *popupState {
@@ -139,8 +161,8 @@ func (p popupState) value() string {
 		if len(p.options) > 0 {
 			return p.options[p.cursor].id
 		}
-	case inputPopup:
-		return strings.TrimSpace(p.input.Value())
+	case formPopup:
+		return strings.TrimSpace(p.fields[0].input.Value())
 	case capturePopup:
 		return p.editor.Value()
 	}
@@ -154,7 +176,25 @@ func (p *popupState) setSize(width, height int) {
 		p.editor.SetWidth(w - 4)
 		p.editor.SetHeight(max(h-5, 2))
 	}
-	p.input.SetWidth(popupWidth(width) - 6)
+	for i := range p.fields {
+		p.fields[i].input.SetWidth(popupWidth(width) - 8)
+	}
+}
+
+// values are a form's entries, as typed.
+func (p popupState) values() []string {
+	values := make([]string, len(p.fields))
+	for i, f := range p.fields {
+		values[i] = f.input.Value()
+	}
+	return values
+}
+
+// focusField moves a form's focus, blurring the field it leaves.
+func (p *popupState) focusField(i int) tea.Cmd {
+	p.fields[p.field].input.Blur()
+	p.field = (i + len(p.fields)) % len(p.fields)
+	return p.fields[p.field].input.Focus()
 }
 
 func popupWidth(width int) int { return min(58, max(width-6, 20)) }
@@ -194,14 +234,28 @@ func (p popupState) Update(msg tea.Msg, keys workspaceKeyMap) (popupState, tea.C
 			return p, nil, popupCancelled
 		}
 		return p, nil, popupOpen
-	case inputPopup:
+	case formPopup:
 		switch {
 		case key.Matches(press, keys.Open):
-			if err := validateProjectName(p.value()); err != nil {
+			if err := p.fields[p.field].validate(p.fields[p.field].input.Value()); err != nil {
 				p.err = err.Error()
 				return p, nil, popupOpen
 			}
+			if p.field < len(p.fields)-1 {
+				p.err = ""
+				return p, p.focusField(p.field + 1), popupOpen
+			}
+			for i, f := range p.fields {
+				if err := f.validate(f.input.Value()); err != nil {
+					p.err = err.Error()
+					return p, p.focusField(i), popupOpen
+				}
+			}
 			return p, nil, popupAccepted
+		case key.Matches(press, keys.NextPanel) && len(p.fields) > 1:
+			return p, p.focusField(p.field + 1), popupOpen
+		case key.Matches(press, keys.PrevPanel) && len(p.fields) > 1:
+			return p, p.focusField(p.field - 1), popupOpen
 		case key.Matches(press, keys.Back):
 			return p, nil, popupCancelled
 		}
@@ -237,8 +291,8 @@ func (p popupState) Update(msg tea.Msg, keys workspaceKeyMap) (popupState, tea.C
 func (p popupState) updateField(msg tea.Msg) (popupState, tea.Cmd, popupOutcome) {
 	var cmd tea.Cmd
 	switch p.kind {
-	case inputPopup:
-		p.input, cmd = p.input.Update(msg)
+	case formPopup:
+		p.fields[p.field].input, cmd = p.fields[p.field].input.Update(msg)
 		p.err = ""
 	case capturePopup:
 		p.editor, cmd = p.editor.Update(msg)
@@ -272,8 +326,24 @@ func (p popupState) View(width, height int, spinner string) string {
 			lines = append(lines, listRow(safeText(p.options[i].label), i == p.cursor, true, inner))
 		}
 		footer = list.counter(len(p.options), rows)
-	case inputPopup:
-		lines = append(lines, p.input.View())
+	case formPopup:
+		if p.message != "" {
+			lines = append(lines, strings.Split(lipgloss.NewStyle().Width(inner).Render(safeText(p.message)), "\n")...)
+			lines = append(lines, "")
+		}
+		for i, f := range p.fields {
+			if len(p.fields) > 1 {
+				label := dimStyle
+				if i == p.field {
+					label = titleStyle
+				}
+				lines = append(lines, label.Render(f.label))
+			}
+			lines = append(lines, f.input.View())
+			if i < len(p.fields)-1 {
+				lines = append(lines, "")
+			}
+		}
 	case capturePopup:
 		lines = append(lines, strings.Split(p.editor.View(), "\n")...)
 		count := fmt.Sprintf("%d / %d", utf8.RuneCountInString(p.editor.Value()), maxNoteLength)
@@ -308,6 +378,12 @@ func (p popupState) busyText() string {
 		return "Creating…"
 	case archiveProjectAction:
 		return "Archiving…"
+	case revokeSessionAction, revokeAllAction:
+		return "Revoking…"
+	case signOutAction:
+		return "Signing out…"
+	case deleteAccountAction:
+		return "Requesting deletion…"
 	}
 	return "Working…"
 }
@@ -321,8 +397,12 @@ func (p popupState) ShortHelp(keys workspaceKeyMap) []key.Binding {
 		return []key.Binding{bind("y", p.acceptLabel(), "y"), bind("n/esc", "cancel", "n", "esc")}
 	case p.kind == menuPopup:
 		return []key.Binding{keySelect, bind("enter", "choose", "enter"), keyCancel}
-	case p.kind == inputPopup:
-		return []key.Binding{bind("enter", "create", "enter"), keyCancel}
+	case p.kind == formPopup && p.field < len(p.fields)-1:
+		return []key.Binding{bind("enter", "next", "enter"), bind("tab", "switch field", "tab"), keyCancel}
+	case p.kind == formPopup && len(p.fields) > 1:
+		return []key.Binding{bind("enter", p.accept, "enter"), bind("tab", "switch field", "tab"), keyCancel}
+	case p.kind == formPopup:
+		return []key.Binding{bind("enter", p.accept, "enter"), keyCancel}
 	}
 	return []key.Binding{bind("ctrl+s", "save", "ctrl+s"), bind("enter", "new line", "enter"), keyCancel}
 }

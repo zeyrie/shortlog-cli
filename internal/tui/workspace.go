@@ -64,6 +64,7 @@ type workspaceModel struct {
 	note    *statusNote
 	expired bool         // a request was refused with 401; the root signs out
 	unsent  *unsentDraft // text the expired session could not save
+	signOut *signOut     // the session ended by request; the root signs out
 }
 
 func newWorkspace(client workspaceClient, token, server string) workspaceModel {
@@ -184,6 +185,21 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 			return w, nil
 		}
 		return w.onProjectArchived(msg)
+	case profileUpdated:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onProfileUpdated(msg), nil
+	case sessionEnded:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onSessionEnded(msg), nil
+	case accountDeletionRequested:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onAccountDeletionRequested(msg), nil
 	}
 	if w.popup != nil {
 		return w.updatePopup(msg)
@@ -218,6 +234,22 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 		w.setFocus([]focusArea{focusNotes, focusMain, focusAccount, focusProjects}[w.focus])
 	case key.Matches(msg2, k.Refresh):
 		return w, w.refresh()
+	case key.Matches(msg2, k.EditProfile) && w.onAccountPage():
+		w.startEditProfile()
+	case key.Matches(msg2, k.RevokeSession) && w.onAccountPage():
+		w.startRevoke()
+	case key.Matches(msg2, k.RevokeAll) && w.onAccountPage():
+		w.startRevokeAll()
+	case key.Matches(msg2, k.SignOut) && w.onAccountPage():
+		w.startSignOut()
+	case key.Matches(msg2, k.DeleteAccount) && w.onAccountPage():
+		w.startDeleteAccount()
+	case (key.Matches(msg2, k.Up) || key.Matches(msg2, k.Down)) && w.onAccountPage():
+		delta := 1
+		if key.Matches(msg2, k.Up) {
+			delta = -1
+		}
+		w.account.list.move(delta, len(w.account.sessions), len(w.account.sessions))
 	case key.Matches(msg2, k.New) && w.onNotes():
 		return w, w.startNewNote()
 	case key.Matches(msg2, k.Edit) && w.onNotes():
@@ -402,6 +434,8 @@ type workspaceKeyMap struct {
 	Open, Back, Refresh, Quit                          key.Binding
 	New, Edit, Move, Delete, NewProject, Archive       key.Binding
 	Unarchive, Save, Yes, No                           key.Binding
+	EditProfile, RevokeSession, RevokeAll, SignOut     key.Binding
+	DeleteAccount                                      key.Binding
 }
 
 func defaultWorkspaceKeys() workspaceKeyMap {
@@ -430,6 +464,11 @@ func defaultWorkspaceKeys() workspaceKeyMap {
 		Unarchive:     bind("u", "unarchive", "u"),
 		Save:          bind("ctrl+s", "save", "ctrl+s"),
 		Yes:           bind("y", "yes", "y", "Y"),
+		EditProfile:   bind("e", "edit profile", "e"),
+		RevokeSession: bind("x", "revoke", "x"),
+		RevokeAll:     bind("a", "revoke all", "a"),
+		SignOut:       bind("l", "sign out", "l"),
+		DeleteAccount: bind("D", "delete account", "D"),
 		No:            bind("n/esc", "no", "n", "N", "esc"),
 		Quit:          bind("q", "quit", "q"),
 	}
@@ -461,12 +500,22 @@ func (w workspaceModel) ShortHelp() []key.Binding {
 		return []key.Binding{k.New, k.Edit, k.Move, k.Delete, keySelect, tabs, bind("enter", "read", "enter"), k.Refresh, panels, k.Quit}
 	case focusMain:
 		if w.back == focusAccount {
-			return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, k.Refresh, panels, k.Quit}
+			return w.accountHelp(k.Back)
 		}
 		if !writable {
 			return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
 		}
 		return []key.Binding{k.Edit, k.New, bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
 	}
-	return []key.Binding{bind("enter", "account page", "enter"), k.Refresh, panels, k.Quit}
+	return w.accountHelp(bind("enter", "open page", "enter"))
+}
+
+// accountHelp lists the account page's keys, once the account has loaded.
+func (w workspaceModel) accountHelp(nav key.Binding) []key.Binding {
+	k := w.keys
+	panels := bind("0-3", "panels", "0", "1", "2", "3")
+	if !w.accountState.loaded {
+		return []key.Binding{k.Refresh, panels, k.Quit}
+	}
+	return []key.Binding{k.EditProfile, bind("↑/↓", "session", "up", "down"), k.RevokeSession, k.SignOut, k.RevokeAll, k.DeleteAccount, nav, k.Refresh, panels, k.Quit}
 }

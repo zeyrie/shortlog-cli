@@ -17,6 +17,14 @@ type accountPanel struct {
 	sessions    []api.Session
 	sessionsErr string
 	server      string
+	list        scrollList // the selected session
+}
+
+func (a accountPanel) selectedSession() (api.Session, bool) {
+	if len(a.sessions) == 0 {
+		return api.Session{}, false
+	}
+	return a.sessions[min(a.list.cursor, len(a.sessions)-1)], true
 }
 
 func (a accountPanel) View(width, height int, focused bool, state loadState, spinner string) string {
@@ -46,32 +54,28 @@ func (a accountPanel) page(width, height int, focused bool, state loadState, spi
 	}
 	label := lipgloss.NewStyle().Width(14).Foreground(lipgloss.BrightBlack)
 	section := lipgloss.NewStyle().Bold(true)
+	hint := func(k, action string) string { return "  " + helpKeyStyle.Render(k) + dimStyle.Render(" "+action) }
 	var b strings.Builder
-	b.WriteString(" " + section.Render("Profile") + "\n")
+	b.WriteString(" " + section.Render("Profile") + hint("e", "edit") + "\n")
 	b.WriteString("  " + label.Render("Name") + safeText(a.account.Username) + "\n")
 	b.WriteString("  " + label.Render("Time zone") + safeText(a.account.TimeZone) + "\n")
 	if !a.account.CreatedAt.IsZero() {
 		b.WriteString("  " + label.Render("Member since") + a.account.CreatedAt.Local().Format("Jan 2006") + "\n")
 	}
-	b.WriteString("\n " + section.Render("Sessions") + "\n")
+	b.WriteString("\n " + section.Render("Sessions") + hint("x", "revoke") + hint("a", "revoke all") + "\n")
 	if a.sessionsErr != "" {
 		b.WriteString("  " + errStyle.Render("✗ "+a.sessionsErr) + "\n")
 	}
-	for _, s := range a.sessions {
-		name := safeText(s.DeviceLabel)
-		if name == "" {
-			name = safeText(s.UserAgent)
-		}
-		if name == "" {
-			name = "Unknown device"
-		}
+	for i, s := range a.sessions {
+		name := sessionName(s)
 		if s.Current {
 			name += dimStyle.Render(" (this device)")
 		}
-		b.WriteString("  " + lipgloss.NewStyle().Width(max(width-24, 12)).Render(name) + dimStyle.Render(lastUsed(s.LastUsedAt, now)) + "\n")
+		row := lipgloss.NewStyle().Width(max(width-26, 12)).Render(name) + dimStyle.Render(lastUsed(s.LastUsedAt, now))
+		b.WriteString(listRow(row, i == a.list.cursor, focused, width-2) + "\n")
 	}
-	b.WriteString("\n " + section.Render("Sign out of this device") + "\n")
-	b.WriteString(" " + errStyle.Render("Delete account…"))
+	b.WriteString("\n " + section.Render("Sign out of this device") + hint("l", "sign out") + "\n")
+	b.WriteString(" " + errStyle.Render("Delete account") + hint("D", "delete…"))
 	return f.render(b.String(), width, height)
 }
 

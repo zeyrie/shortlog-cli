@@ -439,7 +439,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.login, cmd = m.login.Update(msg)
 		return m, cmd
-	case accountLoaded, projectsLoaded, notesLoaded, noteCreated, noteUpdated, noteDeleted, noteMoved, projectAdded, projectArchived:
+	case accountLoaded, projectsLoaded, notesLoaded, noteCreated, noteUpdated, noteDeleted, noteMoved, projectAdded, projectArchived,
+		profileUpdated, sessionEnded, accountDeletionRequested:
 		if m.stage != workspaceStage {
 			return m, nil // a late result for a session that has ended
 		}
@@ -1536,6 +1537,9 @@ func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.expireSession()
 		return m, nil
 	}
+	if out := m.workspace.signOut; out != nil {
+		return m, m.endSession(out.notice)
+	}
 	return m, cmd
 }
 
@@ -1553,6 +1557,29 @@ func (m *Model) expireSession() {
 	if m.resume != nil {
 		m.message = "Session expired. Sign in again to save your unsaved text."
 	}
+}
+
+// endSession signs out locally after the server ended the session on
+// request: the saved credential goes, and sign-in shows notice. The demo has
+// no sign-in to return to, so it starts over instead.
+func (m *Model) endSession(notice string) tea.Cmd {
+	if m.demo {
+		demo := NewDemo()
+		demo.width, demo.height = m.width, m.height
+		demo.workspace.setSize(m.width, demo.bodyHeight())
+		*m = demo
+		m.setStatus(statusInfo, "The demo has no server to sign out of, so it started over.")
+		return nil
+	}
+	err := m.store.Delete()
+	m.token = ""
+	m.workspace = workspaceModel{}
+	m.openLogin()
+	m.message = notice
+	if err != nil {
+		m.message += " The saved credential could not be removed; remove it from your credential store before restarting."
+	}
+	return nil
 }
 
 // sessionSaved reports whether the OS credential store kept a new session.

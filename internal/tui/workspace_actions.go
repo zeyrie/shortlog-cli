@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,6 +28,7 @@ type workspaceWriteAPI interface {
 type workspaceClient interface {
 	workspaceAPI
 	workspaceWriteAPI
+	accountAPI
 }
 
 // Results of the workspace's changes. Like its loads, each carries the
@@ -189,7 +191,8 @@ func (w *workspaceModel) startDelete() {
 }
 
 func (w *workspaceModel) startNewProject() {
-	w.popup = newInput("New project", "Project name", 120, pendingAction{kind: newProjectAction})
+	field := newField("Name", "Project name", "", 120, func(name string) error { return validateProjectName(strings.TrimSpace(name)) })
+	w.popup = newForm("New project", "", "create", false, []popupField{field}, pendingAction{kind: newProjectAction})
 	w.popup.setSize(w.width, w.height)
 }
 
@@ -260,7 +263,7 @@ func (w *workspaceModel) acceptPopup() tea.Cmd {
 	case archiveProjectAction:
 		return w.setArchived(action.id, true)
 	}
-	return nil
+	return w.acceptAccountAction(action)
 }
 
 func (w *workspaceModel) setArchived(id string, archived bool) tea.Cmd {
