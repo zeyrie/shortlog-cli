@@ -26,6 +26,11 @@ type emailAPI interface {
 	Inbox(context.Context, string) (api.NotesPage, error)
 	InboxPage(context.Context, string, string) (api.NotesPage, error)
 	CreateInboxNote(context.Context, string, string) (api.Note, error)
+	Projects(context.Context, string) ([]api.Project, error)
+	CreateProject(context.Context, string, string) (api.Project, error)
+	ProjectNotes(context.Context, string, string) (api.NotesPage, error)
+	ProjectNotesPage(context.Context, string, string, string) (api.NotesPage, error)
+	CreateProjectNote(context.Context, string, string, string) (api.Note, error)
 	UpdateNote(context.Context, string, string, string) (api.Note, error)
 	DeleteNote(context.Context, string, string) error
 }
@@ -49,13 +54,22 @@ const (
 	captureStage
 	discardStage
 	deleteStage
+	projectsStage
+	newProjectStage
 )
+
+// noteList snapshots the Inbox while a project's notes are open.
+type noteList struct {
+	notes    []api.Note
+	cursor   string
+	selected int
+}
 
 type Model struct {
 	api              emailAPI
 	store            sessionStore
 	stage            stage
-	inputs           [4]textinput.Model
+	inputs           [5]textinput.Model
 	focus            int
 	challenge        string
 	ticket           string
@@ -63,6 +77,11 @@ type Model struct {
 	email            string
 	username         string
 	notes            []api.Note
+	inboxList        noteList
+	activeProject    *api.Project
+	inboxStashed     bool
+	projects         []api.Project
+	projectSelected  int
 	nextCursor       string
 	selected         int
 	reader           viewport.Model
@@ -86,6 +105,7 @@ const (
 	codeInput
 	usernameInput
 	zoneInput
+	projectNameInput
 )
 
 func New(client emailAPI, store sessionStore) Model {
@@ -114,6 +134,8 @@ func New(client emailAPI, store sessionStore) Model {
 	m.inputs[usernameInput].CharLimit = 80
 	m.inputs[zoneInput].Placeholder = "e.g. Europe/London"
 	m.inputs[zoneInput].CharLimit = 64
+	m.inputs[projectNameInput].Placeholder = "Project name"
+	m.inputs[projectNameInput].CharLimit = 120
 	zone := time.Now().Location().String()
 	if zone != "Local" {
 		m.inputs[zoneInput].SetValue(zone)
@@ -169,6 +191,35 @@ type olderNotes struct {
 	cursor string
 	err    error
 }
+type projectsResult struct {
+	projects []api.Project
+	err      error
+}
+type projectCreated struct {
+	project api.Project
+	err     error
+}
+
+func (m Model) fetchNotes(ctx context.Context, token string) (api.NotesPage, error) {
+	if m.activeProject != nil {
+		return m.api.ProjectNotes(ctx, token, m.activeProject.ID)
+	}
+	return m.api.Inbox(ctx, token)
+}
+
+func (m Model) fetchOlder(ctx context.Context, token, cursor string) (api.NotesPage, error) {
+	if m.activeProject != nil {
+		return m.api.ProjectNotesPage(ctx, token, m.activeProject.ID, cursor)
+	}
+	return m.api.InboxPage(ctx, token, cursor)
+}
+
+func (m Model) fetchProjects() tea.Cmd {
+	return func() tea.Msg {
+		projects, err := m.api.Projects(context.Background(), m.token)
+		return projectsResult{projects, err}
+	}
+}
 
 func (m Model) loadInbox(token string, save bool) tea.Cmd {
 	return func() tea.Msg {
@@ -184,7 +235,7 @@ func (m Model) loadInbox(token string, save bool) tea.Cmd {
 		if err != nil {
 			return inboxResult{err: err, saveErr: saveErr}
 		}
-		page, err := m.api.Inbox(context.Background(), token)
+		page, err := m.fetchNotes(context.Background(), token)
 		return inboxResult{account: account, page: page, err: err, saveErr: saveErr}
 	}
 }
@@ -217,6 +268,52 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = "Could not remove the old saved session; it may reopen on next launch."
 		}
 		return m, nil
+	case projectsResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.activeProject = nil
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			m.message = "Could not load projects. Press r to retry."
+			return m, nil
+		}
+		m.projects = msg.projects
+		if m.projectSelected >= len(m.projects) {
+			m.projectSelected = max(0, len(m.projects)-1)
+		}
+		m.message = ""
+		return m, nil
+	case projectCreated:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				m.message = "Project name must be 1–120 characters."
+			} else {
+				m.message = "Creation not confirmed. Check the project list before retrying."
+			}
+			return m, nil
+		}
+		m.projects = append([]api.Project{msg.project}, m.projects...)
+		m.projectSelected = 0
+		m.inputs[projectNameInput].SetValue("")
+		m.inputs[projectNameInput].Blur()
+		return m, m.openProject(msg.project)
 	case inboxResult:
 		m.busy = false
 		if msg.err != nil {
@@ -231,9 +328,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.stage = inboxStage
 			if m.selectID != "" {
-				m.message = "Note saved, but Inbox refresh failed. Press r to retry."
+				m.message = "Note saved, but notes refresh failed. Press r to retry."
 			} else {
-				m.message = friendlyError(msg.err, "Could not load your Inbox.") + " Press r to retry."
+				m.message = friendlyError(msg.err, "Could not load notes.") + " Press r to retry."
 			}
 			return m, nil
 		}
@@ -251,7 +348,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.selectID = ""
-			m.message = "Note saved to Inbox."
+			m.message = "Note saved."
 		}
 		if msg.saveErr != nil {
 			m.message = "Could not save session to the OS credential store; you may need to sign in next time."
@@ -328,7 +425,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.selected = 0
 		m.draft.SetValue("")
 		m.draft.Blur()
-		m.message = "Note saved. Refreshing Inbox…"
+		m.message = "Note saved. Refreshing notes…"
 		return m, m.loadInbox(m.token, false)
 	case updatedNote:
 		m.busy = false
@@ -488,6 +585,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case readingStage:
 				m.stage = inboxStage
 				return m, nil
+			case inboxStage:
+				// Leaving a project's notes returns to the project list; the
+				// Inbox snapshot stays stashed for openInbox.
+				if m.activeProject != nil {
+					m.activeProject = nil
+					m.notes = nil
+					m.nextCursor = ""
+					m.selected = 0
+					m.stage = projectsStage
+					m.message = ""
+					return m, nil
+				}
+			case projectsStage:
+				return m, m.openInbox()
+			case newProjectStage:
+				m.inputs[projectNameInput].Blur()
+				m.inputs[projectNameInput].SetValue("")
+				m.stage = projectsStage
+				return m, nil
 			}
 			m.message = ""
 			return m, nil
@@ -560,13 +676,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case inboxStage:
 			switch msg.String() {
+			case "p":
+				m.stage = projectsStage
+				m.busy = true
+				m.message = "Loading projects…"
+				return m, m.fetchProjects()
 			case "m":
 				if m.nextCursor != "" {
 					m.busy = true
 					m.message = "Loading older notes…"
 					cursor := m.nextCursor
 					return m, func() tea.Msg {
-						page, err := m.api.InboxPage(context.Background(), m.token, cursor)
+						page, err := m.fetchOlder(context.Background(), m.token, cursor)
 						return olderNotes{page: page, cursor: cursor, err: err}
 					}
 				}
@@ -592,6 +713,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = emailStage
 				m.token = ""
 				m.notes = nil
+				m.activeProject = nil
+				m.inboxList = noteList{}
+				m.inboxStashed = false
 				m.busy = true
 				m.message = "Removing saved session…"
 				m.focusInput(emailInput)
@@ -657,6 +781,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 						return updatedNote{note, err}
 					}
 				}
+				if m.activeProject != nil {
+					project := *m.activeProject
+					return m, func() tea.Msg {
+						note, err := m.api.CreateProjectNote(context.Background(), m.token, project.ID, content)
+						return createdNote{note, err}
+					}
+				}
 				return m, func() tea.Msg {
 					note, err := m.api.CreateInboxNote(context.Background(), m.token, content)
 					return createdNote{note, err}
@@ -695,9 +826,57 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		case projectsStage:
+			switch msg.String() {
+			case "j", "down":
+				if m.projectSelected+1 < len(m.projects) {
+					m.projectSelected++
+				}
+			case "k", "up":
+				if m.projectSelected > 0 {
+					m.projectSelected--
+				}
+			case "a":
+				m.stage = newProjectStage
+				m.inputs[projectNameInput].SetValue("")
+				m.message = ""
+				m.focusInput(projectNameInput)
+				return m, textinput.Blink
+			case "i":
+				return m, m.openInbox()
+			case "r":
+				m.busy = true
+				m.message = "Loading projects…"
+				return m, m.fetchProjects()
+			case "enter":
+				if len(m.projects) > 0 {
+					return m, m.openProject(m.projects[m.projectSelected])
+				}
+			case "q":
+				return m, tea.Quit
+			}
+			return m, nil
+		case newProjectStage:
+			if msg.String() == "enter" {
+				name := strings.TrimSpace(m.inputs[projectNameInput].Value())
+				if name == "" {
+					m.message = "Enter a project name."
+					return m, nil
+				}
+				if utf8.RuneCountInString(name) > 120 {
+					m.message = "Project names must be at most 120 characters."
+					return m, nil
+				}
+				m.busy = true
+				m.message = "Creating project…"
+				return m, func() tea.Msg {
+					project, err := m.api.CreateProject(context.Background(), m.token, name)
+					return projectCreated{project, err}
+				}
+			}
 		}
 	}
-	if m.stage <= profileStage && !m.busy {
+	if (m.stage <= profileStage || m.stage == newProjectStage) && !m.busy {
 		var cmd tea.Cmd
 		m.inputs[m.focus], cmd = m.inputs[m.focus].Update(message)
 		return m, cmd
@@ -719,6 +898,52 @@ func (m *Model) openEditor(id, content string, back stage) tea.Cmd {
 	m.stage = captureStage
 	m.message = ""
 	return m.draft.Focus()
+}
+
+// openProject shows a project's notes. The Inbox list is snapshotted so it
+// can be restored without refetching when the user returns.
+func (m *Model) openProject(p api.Project) tea.Cmd {
+	if !m.inboxStashed {
+		m.inboxList = noteList{notes: m.notes, cursor: m.nextCursor, selected: m.selected}
+		m.inboxStashed = true
+	}
+	project := p
+	m.activeProject = &project
+	m.notes = nil
+	m.nextCursor = ""
+	m.selected = 0
+	m.stage = inboxStage
+	m.busy = true
+	m.message = "Loading project notes…"
+	return m.loadInbox(m.token, false)
+}
+
+// openInbox returns to the Inbox, restoring the snapshotted list when present.
+func (m *Model) openInbox() tea.Cmd {
+	m.activeProject = nil
+	m.stage = inboxStage
+	if m.inboxStashed {
+		m.notes = m.inboxList.notes
+		m.nextCursor = m.inboxList.cursor
+		m.selected = m.inboxList.selected
+		m.inboxList = noteList{}
+		m.inboxStashed = false
+		m.message = ""
+		return nil
+	}
+	m.notes = nil
+	m.nextCursor = ""
+	m.selected = 0
+	m.busy = true
+	m.message = "Loading Inbox…"
+	return m.loadInbox(m.token, false)
+}
+
+func (m Model) listTitle() string {
+	if m.activeProject != nil {
+		return safeText(m.activeProject.Name)
+	}
+	return "Inbox"
 }
 
 func (m *Model) closeEditor(message string) {
@@ -743,6 +968,9 @@ func (m *Model) signedIn(token string) tea.Cmd {
 	m.ticket = ""
 	m.challenge = ""
 	m.inputs[codeInput].SetValue("")
+	m.activeProject = nil
+	m.inboxList = noteList{}
+	m.inboxStashed = false
 	m.stage = inboxStage
 	m.busy = true
 	m.message = "Loading Inbox…"
@@ -851,13 +1079,17 @@ func (m Model) View() string {
 	case restoreStage:
 		body = "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
 	case inboxStage:
-		body = "Inbox"
-		if m.username != "" {
+		body = m.listTitle()
+		if m.activeProject == nil && m.username != "" {
 			body += " · " + safeText(m.username)
 		}
 		body += "\n\n"
 		if len(m.notes) == 0 && !m.busy && m.message == "" {
-			body += "No Inbox notes yet.\n"
+			if m.activeProject != nil {
+				body += "No notes in this project yet.\n"
+			} else {
+				body += "No Inbox notes yet.\n"
+			}
 		}
 		rows := max(3, m.height-11)
 		start := max(0, m.selected-rows+1)
@@ -871,15 +1103,15 @@ func (m Model) View() string {
 		if m.nextCursor != "" {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · m load older", len(m.notes))))
 		} else if len(m.notes) > 0 {
-			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of Inbox", len(m.notes))))
+			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of %s", len(m.notes), m.listTitle())))
 		}
-		body += "\n" + dimStyle.Render("n new · e edit · d delete · ↑/↓ or j/k select · Enter read · r newest · s sign in · q quit")
+		body += "\n" + dimStyle.Render("p projects · n new · e edit · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sign in · q quit")
 	case readingStage:
-		body = "Inbox · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("e edit · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
+		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("e edit · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
 	case captureStage:
-		heading := "New Inbox note"
+		heading := "New note"
 		if m.editorID != "" {
-			heading = "Edit Inbox note"
+			heading = "Edit note"
 		}
 		status := "unchanged"
 		if m.editorID == "" {
@@ -904,6 +1136,23 @@ func (m Model) View() string {
 			}
 		}
 		body = "Permanently delete “" + title + "”?\nThere is no Trash and this cannot be undone.\n\n" + dimStyle.Render("y delete permanently · n or Esc cancel")
+	case projectsStage:
+		body = "Projects\n\n"
+		if len(m.projects) == 0 && !m.busy && m.message == "" {
+			body += "No projects yet.\n"
+		}
+		rows := max(3, m.height-11)
+		start := max(0, m.projectSelected-rows+1)
+		for i := start; i < len(m.projects) && i < start+rows; i++ {
+			mark := "  "
+			if i == m.projectSelected {
+				mark = "› "
+			}
+			body += fmt.Sprintf("%s%s\n", mark, preview(m.projects[i].Name, max(12, m.innerWidth()-6)))
+		}
+		body += "\n" + dimStyle.Render("a new · Enter open · i Inbox · r refresh · Esc Inbox · q quit")
+	case newProjectStage:
+		body = "New project\n\nName\n" + m.inputs[projectNameInput].View() + "\n\n" + dimStyle.Render("Enter create · Esc cancel")
 	}
 	if m.busy {
 		body += "\n\nWorking…"

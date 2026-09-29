@@ -241,3 +241,81 @@ func TestDeleteNotFoundIsError(t *testing.T) {
 		t.Fatalf("expected not found, got %v", err)
 	}
 }
+
+func TestProjectEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer session" {
+			t.Errorf("missing auth header for %s", r.URL.Path)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_, _ = w.Write([]byte(`[{"id":"p1","name":"Work"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects":
+			var input map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if len(input) != 1 || input["name"] != "Research" {
+				t.Errorf("create body: %v", input)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"p2","name":"Research"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/p1/notes":
+			if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+				if cursor != "opaque &?" || len(r.URL.Query()) != 1 {
+					t.Errorf("cursor query: %q", r.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"items":[{"id":"n1","content":"hello"}],"next_cursor":"opaque &?"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/notes":
+			var input map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input["project_id"] != "p1" || input["content"] != "project note" {
+				t.Errorf("note body: %v", input)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"n2","content":"project note","project_id":"p1"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := client.Projects(context.Background(), "session")
+	if err != nil || len(projects) != 1 || projects[0].ID != "p1" {
+		t.Fatalf("projects: %+v, %v", projects, err)
+	}
+	created, err := client.CreateProject(context.Background(), "session", "Research")
+	if err != nil || created.ID != "p2" || created.Name != "Research" {
+		t.Fatalf("create project: %+v, %v", created, err)
+	}
+	page, err := client.ProjectNotes(context.Background(), "session", "p1")
+	if err != nil || len(page.Items) != 1 || derefCursor(page.NextCursor) != "opaque &?" {
+		t.Fatalf("project notes: %+v, %v", page, err)
+	}
+	older, err := client.ProjectNotesPage(context.Background(), "session", "p1", "opaque &?")
+	if err != nil || len(older.Items) != 0 {
+		t.Fatalf("project notes page: %+v, %v", older, err)
+	}
+	if _, err := client.ProjectNotesPage(context.Background(), "session", "p1", ""); err == nil {
+		t.Fatal("empty cursor silently refreshed first page")
+	}
+	note, err := client.CreateProjectNote(context.Background(), "session", "p1", "project note")
+	if err != nil || note.ID != "n2" {
+		t.Fatalf("project note create: %+v, %v", note, err)
+	}
+}
+
+func derefCursor(cursor *string) string {
+	if cursor == nil {
+		return ""
+	}
+	return *cursor
+}

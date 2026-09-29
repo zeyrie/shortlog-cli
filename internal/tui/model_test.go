@@ -31,6 +31,16 @@ type fakeAPI struct {
 	updated   []string
 	deleteErr error
 	deleted   []string
+
+	projectList      []api.Project
+	projectsErr      error
+	createProjectErr error
+	projectNotes     []api.Note
+	projectNext      *string
+	projectPages     map[string]api.NotesPage
+	projectPageErr   error
+	projectRequested []string
+	projectCreated   []string
 }
 
 type fakeStore struct {
@@ -102,6 +112,33 @@ func (f *fakeAPI) UpdateNote(_ context.Context, _, id, content string) (api.Note
 func (f *fakeAPI) DeleteNote(_ context.Context, _, id string) error {
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
+}
+func (f *fakeAPI) Projects(_ context.Context, _ string) ([]api.Project, error) {
+	return f.projectList, f.projectsErr
+}
+func (f *fakeAPI) CreateProject(_ context.Context, _, name string) (api.Project, error) {
+	if f.createProjectErr != nil {
+		return api.Project{}, f.createProjectErr
+	}
+	project := api.Project{ID: "project-" + name, Name: name}
+	f.projectList = append([]api.Project{project}, f.projectList...)
+	return project, nil
+}
+func (f *fakeAPI) ProjectNotes(_ context.Context, _, _ string) (api.NotesPage, error) {
+	return api.NotesPage{Items: f.projectNotes, NextCursor: f.projectNext}, f.inboxErr
+}
+func (f *fakeAPI) ProjectNotesPage(_ context.Context, _, _, cursor string) (api.NotesPage, error) {
+	f.projectRequested = append(f.projectRequested, cursor)
+	return f.projectPages[cursor], f.projectPageErr
+}
+func (f *fakeAPI) CreateProjectNote(_ context.Context, _, _, content string) (api.Note, error) {
+	f.projectCreated = append(f.projectCreated, content)
+	if f.createErr != nil {
+		return api.Note{}, f.createErr
+	}
+	note := api.Note{ID: "project-created", Content: content, CreatedAt: time.Now()}
+	f.projectNotes = append([]api.Note{note}, f.projectNotes...)
+	return note, nil
 }
 
 func press(m Model, key tea.KeyMsg) (Model, tea.Cmd) {
@@ -515,6 +552,155 @@ func TestQuitWithDirtyEditorNeedsConfirmation(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirmed quit did not exit")
+	}
+}
+
+func TestProjectNavigationAndInboxRestore(t *testing.T) {
+	f := &fakeAPI{
+		notes:        []api.Note{{ID: "inbox-one", Content: "inbox one"}, {ID: "inbox-two", Content: "inbox two"}},
+		projectList:  []api.Project{{ID: "p1", Name: "First"}, {ID: "p2", Name: "Second"}},
+		projectNotes: []api.Note{{ID: "pn1", Content: "project note"}},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	loaded, _ := m.Update(inboxResult{account: api.Account{Username: "Ari"}, page: api.NotesPage{Items: f.notes}})
+	m = loaded.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selected != 1 {
+		t.Fatal("setup: expected second Inbox note selected")
+	}
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if m.stage != projectsStage || !m.busy || cmd == nil {
+		t.Fatal("p did not open loading project list")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.busy || len(m.projects) != 2 || m.projectSelected != 0 {
+		t.Fatal("projects list did not load")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || m.activeProject == nil || m.activeProject.ID != "p2" || !m.inboxStashed {
+		t.Fatal("Enter did not open the selected project with Inbox stashed")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.busy || len(m.notes) != 1 || m.notes[0].ID != "pn1" || !strings.Contains(m.View(), "Second") {
+		t.Fatal("project notes did not load under the project title")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.stage != readingStage || !strings.Contains(m.View(), "project note") {
+		t.Fatal("project note reader failed")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != projectsStage || m.activeProject != nil {
+		t.Fatal("Esc did not return from project notes to the project list")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if m.stage != inboxStage || m.activeProject != nil || m.notes[m.selected].ID != "inbox-two" || m.nextCursor != "" {
+		t.Fatal("Inbox snapshot was not restored with selection")
+	}
+	if !strings.Contains(m.View(), "Inbox") {
+		t.Fatal("Inbox header not restored")
+	}
+}
+
+func TestProjectNoteCreateEditDeletePaginate(t *testing.T) {
+	cursor := "project-cursor"
+	f := &fakeAPI{
+		projectList:  []api.Project{{ID: "p1", Name: "Work"}},
+		projectNotes: []api.Note{{ID: "pn1", Content: "existing"}},
+		projectNext:  &cursor,
+		projectPages: map[string]api.NotesPage{cursor: {Items: []api.Note{{ID: "pn-old", Content: "older"}}}},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m.projects = f.projectList
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.activeProject == nil {
+		t.Fatal("setup: project did not open")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 2 || f.projectRequested[0] != cursor {
+		t.Fatal("older project notes did not load through the project cursor")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != captureStage {
+		t.Fatal("n did not open the editor inside the project")
+	}
+	m.draft.SetValue("for the project")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	next, refresh := m.Update(cmd())
+	m = next.(Model)
+	if f.projectCreated[0] != "for the project" || len(f.created) != 0 {
+		t.Fatal("new note was not created in the project")
+	}
+	next, _ = m.Update(refresh())
+	m = next.(Model)
+	if m.notes[m.selected].Content != "for the project" {
+		t.Fatal("created project note not selected after refresh")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m.draft.SetValue("edited in project")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.notes[m.selected].Content != "edited in project" {
+		t.Fatal("project note edit failed")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(f.deleted) != 1 || len(m.notes) != 1 || m.notes[0].ID != "pn1" {
+		t.Fatal("project note delete failed")
+	}
+}
+
+func TestCreateProjectFlow(t *testing.T) {
+	f := &fakeAPI{}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if m.stage != newProjectStage {
+		t.Fatal("a did not open the new-project form")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if strings.Contains(m.View(), "Enter a project name") == false {
+		t.Fatal("empty name accepted")
+	}
+	m.inputs[projectNameInput].SetValue("Research")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || cmd == nil {
+		t.Fatal("project creation not dispatched")
+	}
+	next, load := m.Update(cmd())
+	m = next.(Model)
+	if m.activeProject == nil || m.activeProject.Name != "Research" || len(m.projects) != 1 || m.inputs[projectNameInput].Value() != "" {
+		t.Fatal("created project did not open")
+	}
+	next, _ = m.Update(load())
+	m = next.(Model)
+	if m.stage != inboxStage || m.busy {
+		t.Fatal("project notes screen did not settle")
+	}
+}
+
+func TestCreateProjectFailureKeepsForm(t *testing.T) {
+	f := &fakeAPI{createProjectErr: &api.Error{Status: 400, Code: "invalid_request"}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = newProjectStage, false, "token"
+	m.inputs[projectNameInput].SetValue("Nope")
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != newProjectStage || m.inputs[projectNameInput].Value() != "Nope" || !strings.Contains(m.View(), "1–120") {
+		t.Fatal("failed creation lost the form")
 	}
 }
 

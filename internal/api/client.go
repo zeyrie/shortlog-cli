@@ -126,6 +126,50 @@ type NotesPage struct {
 	NextCursor *string `json:"next_cursor"`
 }
 
+type Project struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (c *Client) Projects(ctx context.Context, token string) ([]Project, error) {
+	var projects []Project
+	err := c.get(ctx, "/v1/projects", token, &projects)
+	return projects, err
+}
+
+func (c *Client) CreateProject(ctx context.Context, token, name string) (Project, error) {
+	var project Project
+	err := c.postAuthorized(ctx, "/v1/projects", token, map[string]string{"name": name}, &project, http.StatusCreated)
+	if err == nil && project.ID == "" {
+		err = errors.New("invalid API response: missing project ID")
+	}
+	return project, err
+}
+
+func (c *Client) ProjectNotes(ctx context.Context, token, projectID string) (NotesPage, error) {
+	var page NotesPage
+	err := c.get(ctx, "/v1/projects/"+url.PathEscape(projectID)+"/notes", token, &page)
+	return page, err
+}
+
+func (c *Client) ProjectNotesPage(ctx context.Context, token, projectID, cursor string) (NotesPage, error) {
+	if cursor == "" {
+		return NotesPage{}, errors.New("missing project notes cursor")
+	}
+	var page NotesPage
+	err := c.get(ctx, "/v1/projects/"+url.PathEscape(projectID)+"/notes?cursor="+url.QueryEscape(cursor), token, &page)
+	return page, err
+}
+
+func (c *Client) CreateProjectNote(ctx context.Context, token, projectID, content string) (Note, error) {
+	var result Note
+	err := c.postAuthorized(ctx, "/v1/notes", token, map[string]string{"content": content, "project_id": projectID}, &result, http.StatusCreated)
+	if err == nil && result.ID == "" {
+		err = errors.New("invalid API response: missing note ID")
+	}
+	return result, err
+}
+
 func (c *Client) Inbox(ctx context.Context, token string) (NotesPage, error) {
 	var result NotesPage
 	err := c.get(ctx, "/v1/notes", token, &result)
