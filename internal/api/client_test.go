@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestEmailFlow(t *testing.T) {
@@ -455,5 +456,48 @@ func TestSessionEndpoints(t *testing.T) {
 	}
 	if len(requests) != 4 {
 		t.Fatalf("requests: %v", requests)
+	}
+}
+
+func TestAccountSettingsEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Error("missing bearer token")
+		}
+		if r.URL.Path != "/v1/me" {
+			t.Errorf("wrong path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodPatch:
+			var fields map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+				t.Error(err)
+			}
+			if len(fields) != 2 || fields["username"] != "New Name" || fields["time_zone"] != "Europe/London" {
+				t.Errorf("profile body: %v", fields)
+			}
+			_, _ = w.Write([]byte(`{"id":"account","username":"New Name","time_zone":"Europe/London","created_at":"2026-01-01T00:00:00Z"}`))
+		case http.MethodDelete:
+			if r.ContentLength > 0 {
+				t.Error("deletion must not have a body")
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"deletion_scheduled_for":"2026-10-29T12:00:00Z"}`))
+		default:
+			t.Errorf("wrong method: %s", r.Method)
+		}
+	}))
+	defer server.Close()
+	c, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := c.UpdateProfile(context.Background(), "secret", "New Name", "Europe/London")
+	if err != nil || account.ID != "account" || account.TimeZone != "Europe/London" {
+		t.Fatalf("profile: %+v %v", account, err)
+	}
+	deadline, err := c.RequestAccountDeletion(context.Background(), "secret")
+	if err != nil || deadline.UTC().Format(time.RFC3339) != "2026-10-29T12:00:00Z" {
+		t.Fatalf("deletion: %v %v", deadline, err)
 	}
 }

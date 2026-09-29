@@ -24,4 +24,6 @@ Active projects have the same reading, editing, moving, deletion, pagination, an
 
 Press `s` from Inbox or Projects to manage sessions. The current device is marked. Use `j`/`k` to select a session, `x` to revoke the selected one, `a` to revoke all sessions, or `l` to log out of this device. Each action asks for confirmation. Revoking the current device, revoking all, or logging out clears the local saved credential and returns to sign-in. If a request cannot be confirmed, refresh the list with `r` before retrying.
 
+Press `g` from Inbox or Projects for account settings. Use `e` to edit your name and IANA time zone (`Tab` switches fields, `Enter` saves, and `Esc` asks before discarding changes). Use `d` to request account deletion; the screen explains the consequences and requires typing `DELETE` exactly. When accepted, all sessions are revoked immediately and the account can be restored by signing in with the same identity before the displayed 30-day deadline. After that deadline, the server's scheduled purge permanently erases the account and its data. If deletion cannot be confirmed, check your account status before retrying.
+
 Run tests with `go test ./...`.

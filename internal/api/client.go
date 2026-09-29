@@ -102,8 +102,10 @@ func (c *Client) get(ctx context.Context, path, token string, output any) error 
 }
 
 type Account struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	TimeZone  string    `json:"time_zone"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (c *Client) Me(ctx context.Context, token string) (Account, error) {
@@ -113,6 +115,26 @@ func (c *Client) Me(ctx context.Context, token string) (Account, error) {
 		err = errors.New("invalid API response: missing account ID")
 	}
 	return result, err
+}
+
+func (c *Client) UpdateProfile(ctx context.Context, token, username, timeZone string) (Account, error) {
+	var result Account
+	err := c.writeNote(ctx, http.MethodPatch, "/v1/me", token, map[string]string{"username": username, "time_zone": timeZone}, &result, http.StatusOK)
+	if err == nil && result.ID == "" {
+		err = errors.New("invalid API response: missing account ID")
+	}
+	return result, err
+}
+
+func (c *Client) RequestAccountDeletion(ctx context.Context, token string) (time.Time, error) {
+	var result struct {
+		DeletionScheduledFor time.Time `json:"deletion_scheduled_for"`
+	}
+	err := c.writeNote(ctx, http.MethodDelete, "/v1/me", token, nil, &result, http.StatusAccepted)
+	if err == nil && result.DeletionScheduledFor.IsZero() {
+		err = errors.New("invalid API response: missing deletion deadline")
+	}
+	return result.DeletionScheduledFor, err
 }
 
 type Session struct {

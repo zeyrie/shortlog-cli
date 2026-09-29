@@ -13,6 +13,12 @@ import (
 )
 
 type fakeAPI struct {
+	account        api.Account
+	accountErr     error
+	profileErr     error
+	profileCalls   int
+	deletionErr    error
+	deletionCalls  int
 	sessionList    []api.Session
 	sessionErr     error
 	actionErr      error
@@ -55,6 +61,22 @@ type fakeAPI struct {
 	projectPageErr   error
 	projectRequested []string
 	projectCreated   []string
+}
+
+func (f *fakeAPI) UpdateProfile(_ context.Context, _, name, zone string) (api.Account, error) {
+	f.profileCalls++
+	if f.profileErr != nil {
+		return api.Account{}, f.profileErr
+	}
+	f.account.Username, f.account.TimeZone = name, zone
+	return f.account, nil
+}
+func (f *fakeAPI) RequestAccountDeletion(_ context.Context, _ string) (time.Time, error) {
+	f.deletionCalls++
+	if f.deletionErr != nil {
+		return time.Time{}, f.deletionErr
+	}
+	return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), nil
 }
 
 func (f *fakeAPI) Sessions(_ context.Context, _ string) ([]api.Session, error) {
@@ -105,6 +127,9 @@ func (f *fakeAPI) RestoreEmail(_ context.Context, _ string) (string, error) {
 }
 
 func (f *fakeAPI) Me(_ context.Context, _ string) (api.Account, error) {
+	if f.account.ID != "" || f.accountErr != nil {
+		return f.account, f.accountErr
+	}
 	return api.Account{ID: "account", Username: "Ari"}, f.meErr
 }
 func (f *fakeAPI) Inbox(_ context.Context, _ string) (api.NotesPage, error) {
@@ -1188,6 +1213,119 @@ func TestSessionActionUnauthorizedClearsCredential(t *testing.T) {
 	m = next.(Model)
 	if m.stage != emailStage || m.token != "" || store.deletes != 1 {
 		t.Fatal("unauthorized session action retained credential")
+	}
+}
+
+func TestAccountProfileEditDiscardAndSave(t *testing.T) {
+	f := &fakeAPI{account: api.Account{ID: "a1", Username: "Ari", TimeZone: "Europe/London"}}
+	m := New(f, &fakeStore{token: "token"})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if m.stage != accountStage || cmd == nil {
+		t.Fatal("account did not open")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if !strings.Contains(m.View(), "Europe/London") {
+		t.Fatal("profile not shown")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Ari" {
+		t.Fatal("profile not prefilled")
+	}
+	m.inputs[accountNameInput].SetValue("Changed")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != accountDiscardStage {
+		t.Fatal("unsaved profile not protected")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != accountEditStage {
+		t.Fatal("discard cancel failed")
+	}
+	m.inputs[accountZoneInput].SetValue("Invalid/Zone")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if f.profileCalls != 0 || !strings.Contains(m.message, "IANA") {
+		t.Fatal("invalid profile was sent")
+	}
+	m.inputs[accountZoneInput].SetValue("UTC")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || !m.busy || f.profileCalls != 0 {
+		t.Fatal("profile save not asynchronous")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != accountStage || m.username != "Changed" || m.account.TimeZone != "UTC" || f.profileCalls != 1 {
+		t.Fatal("profile not saved locally")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != inboxStage || !strings.Contains(m.View(), "Changed") {
+		t.Fatal("updated name not reflected in Inbox")
+	}
+}
+
+func TestAccountDeletionConfirmationAndFailure(t *testing.T) {
+	f := &fakeAPI{account: api.Account{ID: "a1", Username: "Ari", TimeZone: "UTC"}, deletionErr: errors.New("offline")}
+	store := &fakeStore{token: "token"}
+	m := New(f, store)
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.stage != accountDeleteStage || !strings.Contains(m.View(), "30 days") {
+		t.Fatal("deletion warning missing")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if f.deletionCalls != 0 {
+		t.Fatal("deletion sent without phrase")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != accountStage || f.deletionCalls != 0 {
+		t.Fatal("cancel sent deletion")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m.inputs[deletePhraseInput].SetValue("DELETE")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != accountDeleteStage || store.deletes != 0 || m.token != "token" || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("failed deletion signed out")
+	}
+	f.deletionErr = nil
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != emailStage || store.deletes != 1 || m.token != "" || f.deletionCalls != 2 || !strings.Contains(m.View(), "Oct 29") {
+		t.Fatal("accepted deletion did not sign out and show deadline")
+	}
+}
+
+func TestAccountLoadFailureAndProfileSaveFailure(t *testing.T) {
+	f := &fakeAPI{accountErr: errors.New("offline"), account: api.Account{ID: "a1", Username: "Ari", TimeZone: "UTC"}}
+	m := New(f, &fakeStore{token: "token"})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if !strings.Contains(m.View(), "Could not load") {
+		t.Fatal("load failure not shown")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if m.stage != accountStage {
+		t.Fatal("editing unloaded account allowed")
+	}
+	f.accountErr = nil
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m.inputs[accountNameInput].SetValue("Changed")
+	f.profileErr = errors.New("offline")
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != accountEditStage || m.inputs[accountNameInput].Value() != "Changed" || m.username == "Changed" || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("profile failure lost draft")
 	}
 }
 

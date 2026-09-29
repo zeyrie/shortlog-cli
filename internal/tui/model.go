@@ -23,6 +23,8 @@ type emailAPI interface {
 	VerifyEmail(context.Context, string, string, string, string) (api.VerifyResult, error)
 	RestoreEmail(context.Context, string) (string, error)
 	Me(context.Context, string) (api.Account, error)
+	UpdateProfile(context.Context, string, string, string) (api.Account, error)
+	RequestAccountDeletion(context.Context, string) (time.Time, error)
 	Sessions(context.Context, string) ([]api.Session, error)
 	Logout(context.Context, string) error
 	RevokeSession(context.Context, string, string) error
@@ -68,6 +70,10 @@ const (
 	archiveStage
 	sessionsStage
 	sessionConfirmStage
+	accountStage
+	accountEditStage
+	accountDiscardStage
+	accountDeleteStage
 )
 
 type sessionAction int
@@ -94,13 +100,17 @@ type Model struct {
 	api               emailAPI
 	store             sessionStore
 	stage             stage
-	inputs            [5]textinput.Model
+	inputs            [8]textinput.Model
 	focus             int
 	challenge         string
 	ticket            string
 	token             string // Never rendered or logged.
 	email             string
 	username          string
+	account           api.Account
+	accountBack       stage
+	accountStartName  string
+	accountStartZone  string
 	notes             []api.Note
 	inboxList         noteList
 	activeProject     *api.Project
@@ -143,6 +153,9 @@ const (
 	usernameInput
 	zoneInput
 	projectNameInput
+	accountNameInput
+	accountZoneInput
+	deletePhraseInput
 )
 
 func New(client emailAPI, store sessionStore) Model {
@@ -173,6 +186,12 @@ func New(client emailAPI, store sessionStore) Model {
 	m.inputs[zoneInput].CharLimit = 64
 	m.inputs[projectNameInput].Placeholder = "Project name"
 	m.inputs[projectNameInput].CharLimit = 120
+	m.inputs[accountNameInput].Placeholder = "Your name"
+	m.inputs[accountNameInput].CharLimit = 80
+	m.inputs[accountZoneInput].Placeholder = "e.g. Europe/London"
+	m.inputs[accountZoneInput].CharLimit = 64
+	m.inputs[deletePhraseInput].Placeholder = "Type DELETE"
+	m.inputs[deletePhraseInput].CharLimit = 6
 	zone := time.Now().Location().String()
 	if zone != "Local" {
 		m.inputs[zoneInput].SetValue(zone)
@@ -218,6 +237,18 @@ type sessionActionResult struct {
 	action sessionAction
 	id     string
 	err    error
+}
+type accountResult struct {
+	account api.Account
+	err     error
+}
+type profileResult struct {
+	account api.Account
+	err     error
+}
+type deletionResult struct {
+	deadline time.Time
+	err      error
 }
 type createdNote struct {
 	note api.Note
@@ -306,6 +337,8 @@ func (m *Model) finishSession() {
 	m.projects = nil
 	m.sessions = nil
 	m.activeProject = nil
+	m.account = api.Account{}
+	m.username = ""
 	m.inboxList = noteList{}
 	m.inboxStashed = false
 	m.inboxNeedsRefresh = false
@@ -316,6 +349,37 @@ func (m *Model) finishSession() {
 	if err != nil {
 		m.message = "Signed out on the server, but the saved credential could not be removed. Remove it from your credential store before restarting."
 	}
+}
+
+func (m *Model) openAccount(back stage) tea.Cmd {
+	m.accountBack = back
+	m.account = api.Account{}
+	m.stage = accountStage
+	m.busy = true
+	m.message = "Loading account…"
+	return m.fetchAccount()
+}
+
+func (m Model) fetchAccount() tea.Cmd {
+	token := m.token
+	return func() tea.Msg {
+		account, err := m.api.Me(context.Background(), token)
+		return accountResult{account, err}
+	}
+}
+
+func (m *Model) editAccount() tea.Cmd {
+	m.accountStartName, m.accountStartZone = m.account.Username, m.account.TimeZone
+	m.inputs[accountNameInput].SetValue(m.accountStartName)
+	m.inputs[accountZoneInput].SetValue(m.accountStartZone)
+	m.stage = accountEditStage
+	m.message = ""
+	m.focusInput(accountNameInput)
+	return textinput.Blink
+}
+
+func (m Model) accountChanged() bool {
+	return m.inputs[accountNameInput].Value() != m.accountStartName || m.inputs[accountZoneInput].Value() != m.accountStartZone
 }
 
 func (m Model) loadInbox(token string, save bool) tea.Cmd {
@@ -359,6 +423,69 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.token = msg.token
 		m.message = "Checking saved session…"
 		return m, m.loadInbox(msg.token, false)
+	case accountResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				m.finishSession()
+				if m.message == "Signed out." {
+					m.message = "Session expired. Sign in again."
+				}
+				return m, nil
+			}
+			m.message = "Could not load account. Press r to retry or Esc to return."
+			return m, nil
+		}
+		m.account = msg.account
+		m.username = msg.account.Username
+		m.message = ""
+		return m, nil
+	case profileResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				m.finishSession()
+				if m.message == "Signed out." {
+					m.message = "Session expired. Sign in again."
+				}
+				return m, nil
+			}
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
+				m.message = "Server rejected the profile. Check the name and time zone."
+			} else {
+				m.message = "Update not confirmed. Press Esc to review your account before retrying."
+			}
+			return m, nil
+		}
+		m.account = msg.account
+		m.username = msg.account.Username
+		m.inputs[m.focus].Blur()
+		m.stage = accountStage
+		m.message = "Profile updated."
+		return m, nil
+	case deletionResult:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				m.finishSession()
+				if m.message == "Signed out." {
+					m.message = "Session expired. Sign in again."
+				}
+				return m, nil
+			}
+			m.message = "Deletion not confirmed. Check your account before trying again."
+			return m, nil
+		}
+		m.finishSession()
+		warning := ""
+		if m.message != "Signed out." {
+			warning = " The saved credential could not be removed; remove it from your credential store before restarting."
+		}
+		m.message = "Deletion scheduled for " + msg.deadline.Local().Format("Jan 02, 2006 15:04") + ". All devices were signed out. Sign in with the same identity before then to restore your account." + warning
+		return m, nil
 	case sessionsResult:
 		m.busy = false
 		if msg.err != nil {
@@ -528,6 +655,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.stage = inboxStage
 		m.username = msg.account.Username
+		m.account = msg.account
 		m.notes = msg.page.Items
 		m.nextCursor = cursorValue(msg.page.NextCursor)
 		m.selected = 0
@@ -855,6 +983,27 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = sessionsStage
 				m.message = ""
 				return m, nil
+			case accountStage:
+				m.stage = m.accountBack
+				m.message = ""
+				return m, nil
+			case accountEditStage:
+				if m.accountChanged() {
+					m.stage = accountDiscardStage
+					return m, nil
+				}
+				m.inputs[m.focus].Blur()
+				m.stage = accountStage
+				m.message = ""
+				return m, nil
+			case accountDiscardStage:
+				m.stage = accountEditStage
+				return m, nil
+			case accountDeleteStage:
+				m.inputs[deletePhraseInput].Blur()
+				m.stage = accountStage
+				m.message = ""
+				return m, nil
 			}
 			m.message = ""
 			return m, nil
@@ -936,6 +1085,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "s":
 				return m, m.openSessions(inboxStage)
+			case "g":
+				return m, m.openAccount(inboxStage)
 			case "p":
 				if m.activeProject != nil {
 					m.activeProject = nil
@@ -1098,6 +1249,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "s":
 				return m, m.openSessions(projectsStage)
+			case "g":
+				return m, m.openAccount(projectsStage)
 			case "j", "down":
 				if m.projectSelected+1 < len(m.projects) {
 					m.projectSelected++
@@ -1271,6 +1424,100 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		case accountStage:
+			switch msg.String() {
+			case "r":
+				m.busy = true
+				m.message = "Loading account…"
+				return m, m.fetchAccount()
+			case "e":
+				if m.account.ID != "" {
+					return m, m.editAccount()
+				}
+			case "d":
+				if m.account.ID != "" {
+					m.stage = accountDeleteStage
+					m.inputs[deletePhraseInput].SetValue("")
+					m.focusInput(deletePhraseInput)
+					m.message = ""
+					return m, textinput.Blink
+				}
+			}
+			return m, nil
+		case accountEditStage:
+			switch msg.String() {
+			case "tab", "shift+tab":
+				if m.focus == accountNameInput {
+					m.focusInput(accountZoneInput)
+				} else {
+					m.focusInput(accountNameInput)
+				}
+				return m, nil
+			case "enter":
+				name := strings.TrimSpace(m.inputs[accountNameInput].Value())
+				zone := strings.TrimSpace(m.inputs[accountZoneInput].Value())
+				if name == "" || utf8.RuneCountInString(name) > 80 || strings.ContainsFunc(name, unicode.IsControl) {
+					m.message = "Name must be 1–80 characters."
+					return m, nil
+				}
+				if zone == "" || len(zone) > 64 {
+					m.message = "Enter an IANA time zone (at most 64 characters)."
+					return m, nil
+				}
+				if zone == "Local" {
+					m.message = "Choose an IANA time zone such as Europe/London, not Local."
+					return m, nil
+				}
+				if _, err := time.LoadLocation(zone); err != nil {
+					m.message = "Enter a valid IANA time zone (for example, Europe/London)."
+					return m, nil
+				}
+				if name == m.accountStartName && zone == m.accountStartZone {
+					m.stage = accountStage
+					m.inputs[m.focus].Blur()
+					m.message = "No changes to save."
+					return m, nil
+				}
+				m.busy = true
+				m.message = "Updating profile…"
+				token := m.token
+				return m, func() tea.Msg {
+					account, err := m.api.UpdateProfile(context.Background(), token, name, zone)
+					return profileResult{account, err}
+				}
+			}
+			var cmd tea.Cmd
+			m.inputs[m.focus], cmd = m.inputs[m.focus].Update(msg)
+			m.message = ""
+			return m, cmd
+		case accountDiscardStage:
+			switch msg.String() {
+			case "y":
+				m.inputs[m.focus].Blur()
+				m.stage = accountStage
+				m.message = "Changes discarded."
+			case "n":
+				m.stage = accountEditStage
+			}
+			return m, nil
+		case accountDeleteStage:
+			if msg.String() == "enter" {
+				if m.inputs[deletePhraseInput].Value() != "DELETE" {
+					m.message = "Type DELETE exactly to confirm, or Esc to cancel."
+					return m, nil
+				}
+				m.busy = true
+				m.message = "Requesting account deletion…"
+				token := m.token
+				return m, func() tea.Msg {
+					deadline, err := m.api.RequestAccountDeletion(context.Background(), token)
+					return deletionResult{deadline, err}
+				}
+			}
+			var cmd tea.Cmd
+			m.inputs[deletePhraseInput], cmd = m.inputs[deletePhraseInput].Update(msg)
+			m.message = ""
+			return m, cmd
 		}
 	}
 	if (m.stage <= profileStage || m.stage == newProjectStage) && !m.busy {
@@ -1537,9 +1784,9 @@ func (m Model) View() string {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of %s", len(m.notes), m.listTitle())))
 		}
 		if m.archivedProject() {
-			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · s sessions · Esc back · q quit")
+			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · s sessions · g account · Esc back · q quit")
 		} else {
-			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sessions · q quit")
+			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sessions · g account · q quit")
 		}
 	case readingStage:
 		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n"
@@ -1595,10 +1842,26 @@ func (m Model) View() string {
 			body += fmt.Sprintf("%s%s\n", mark, preview(m.projects[i].Name, max(12, m.innerWidth()-6)))
 		}
 		if m.showArchived {
-			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · s sessions · r refresh · Esc Inbox · q quit")
+			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · s sessions · g account · r refresh · Esc Inbox · q quit")
 		} else {
-			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · s sessions · r refresh · Esc Inbox · q quit")
+			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · s sessions · g account · r refresh · Esc Inbox · q quit")
 		}
+	case accountStage:
+		body = "Account settings\n\n"
+		if m.account.ID != "" {
+			body += "Name: " + preview(m.account.Username, m.innerWidth()-7) + "\n"
+			body += "Time zone: " + preview(m.account.TimeZone, m.innerWidth()-12) + "\n"
+			if !m.account.CreatedAt.IsZero() {
+				body += "Created: " + m.account.CreatedAt.Local().Format("Jan 02, 2006") + "\n"
+			}
+		}
+		body += "\n" + dimStyle.Render("e edit profile · d request deletion · r refresh · Esc back")
+	case accountEditStage:
+		body = "Edit profile\n\nName\n" + m.inputs[accountNameInput].View() + "\n\nIANA time zone\n" + m.inputs[accountZoneInput].View() + "\n\n" + dimStyle.Render("Tab switch · Enter save · Esc back")
+	case accountDiscardStage:
+		body = "Discard unsaved profile changes?\n\n" + dimStyle.Render("y discard · n or Esc continue editing")
+	case accountDeleteStage:
+		body = "Schedule account deletion?\n\nAll devices will be signed out immediately. Your projects and notes will become inaccessible. You can restore your account by signing in with the same identity within 30 days. After that, your data is permanently erased by a scheduled job.\n\nType DELETE to confirm:\n" + m.inputs[deletePhraseInput].View() + "\n\n" + dimStyle.Render("Enter request deletion · Esc cancel")
 	case sessionsStage:
 		body = "Sessions\n\n"
 		if len(m.sessions) == 0 && !m.busy && m.message == "" {
