@@ -110,8 +110,9 @@ type Model struct {
 	origin            string // API origin, shown in the status line
 	login             loginModel
 	workspace         workspaceModel
-	demo              bool   // started with sample data and no server
-	token             string // Never rendered or logged.
+	resume            *unsentDraft // text to reopen after signing in again
+	demo              bool         // started with sample data and no server
+	token             string       // Never rendered or logged.
 	username          string
 	account           api.Account
 	accountBack       stage
@@ -438,7 +439,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.login, cmd = m.login.Update(msg)
 		return m, cmd
-	case accountLoaded, projectsLoaded, notesLoaded:
+	case accountLoaded, projectsLoaded, notesLoaded, noteCreated, noteUpdated, noteDeleted, noteMoved, projectAdded, projectArchived:
 		if m.stage != workspaceStage {
 			return m, nil // a late result for a session that has ended
 		}
@@ -877,6 +878,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		m.status.dismiss()
+		if msg.String() == "ctrl+c" && m.stage == workspaceStage && m.workspace.unsaved() {
+			if m.workspace.popup == nil || m.workspace.popup.action.kind != quitAction {
+				m.workspace.confirmQuit()
+				return m, nil
+			}
+			return m, tea.Quit // a second Ctrl+C quits without asking again
+		}
 		if msg.String() == "ctrl+c" {
 			if m.stage == captureStage && !m.busy && m.draft.Value() != m.editorStart {
 				m.stage = discardStage
@@ -1501,7 +1509,21 @@ func (m *Model) openWorkspace(token string) tea.Cmd {
 	host := strings.TrimPrefix(strings.TrimPrefix(m.origin, "https://"), "http://")
 	m.workspace = newWorkspace(m.api, token, host)
 	m.workspace.setSize(m.width, m.bodyHeight())
-	return m.workspace.start()
+	cmd := m.workspace.start()
+	if m.resume != nil {
+		cmd = tea.Batch(cmd, m.workspace.resumeDraft(m.resume))
+		m.resume = nil
+		m.applyWorkspaceNote()
+	}
+	return cmd
+}
+
+// applyWorkspaceNote shows a status the workspace left for the root.
+func (m *Model) applyWorkspaceNote() {
+	if note := m.workspace.note; note != nil {
+		m.workspace.note = nil
+		m.setStatus(note.level, note.text)
+	}
 }
 
 // updateWorkspace runs the workspace and applies what it reports: a status
@@ -1509,10 +1531,7 @@ func (m *Model) openWorkspace(token string) tea.Cmd {
 func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.workspace, cmd = m.workspace.Update(msg)
-	if note := m.workspace.note; note != nil {
-		m.workspace.note = nil
-		m.setStatus(note.level, note.text)
-	}
+	m.applyWorkspaceNote()
 	if m.workspace.expired {
 		m.expireSession()
 		return m, nil
@@ -1527,9 +1546,13 @@ func (m *Model) expireSession() {
 		_ = m.store.Delete()
 	}
 	m.token = ""
+	m.resume = m.workspace.unsent
 	m.workspace = workspaceModel{}
 	m.openLogin()
 	m.message = "Session expired. Sign in again."
+	if m.resume != nil {
+		m.message = "Session expired. Sign in again to save your unsaved text."
+	}
 }
 
 // sessionSaved reports whether the OS credential store kept a new session.

@@ -38,7 +38,7 @@ type notePlace struct {
 // way the sign-in screen does, through state the root reads after each
 // update: a pending status note, and whether the session has expired.
 type workspaceModel struct {
-	api           workspaceAPI
+	api           workspaceClient
 	token         string // never rendered
 	keys          workspaceKeyMap
 	width, height int // the space above the footer
@@ -54,11 +54,19 @@ type workspaceModel struct {
 	projectsState loadState
 	sets          map[string]noteSet // loaded notes by source; see inboxSource
 
+	// popup, when set, is drawn over the workspace and takes every key.
+	popup *popupState
+	// editor, when set, replaces the reader in the main panel.
+	editor *noteEditor
+	// pendingEdit is a restored edit waiting for its note to load.
+	pendingEdit *unsentDraft
+
 	note    *statusNote
-	expired bool // a request was refused with 401; the root signs out
+	expired bool         // a request was refused with 401; the root signs out
+	unsent  *unsentDraft // text the expired session could not save
 }
 
-func newWorkspace(client workspaceAPI, token, server string) workspaceModel {
+func newWorkspace(client workspaceClient, token, server string) workspaceModel {
 	w := workspaceModel{api: client, token: token, keys: defaultWorkspaceKeys(), focus: focusNotes, back: focusNotes, reader: newNoteView(), sets: map[string]noteSet{}}
 	w.account.server = server
 	w.setSize(80, 22)
@@ -95,6 +103,12 @@ func (w *workspaceModel) setSize(width, height int) {
 	w.notes.setRows(notesHeight - 2)
 	_, mainWidth := w.columnWidths()
 	w.reader.setSize(mainWidth, height)
+	if w.editor != nil {
+		w.editor.setSize(mainWidth, height)
+	}
+	if w.popup != nil {
+		w.popup.setSize(width, height)
+	}
 }
 
 // columnWidths splits the width between the panel column and the main panel.
@@ -138,7 +152,44 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 			return w, nil
 		}
 		w = w.onNotesLoaded(msg)
+		w.reopenPendingEdit(msg.source)
 		return w, w.loadMoreIfNear()
+	case noteCreated:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onNoteCreated(msg), nil
+	case noteUpdated:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onNoteUpdated(msg), nil
+	case noteDeleted:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onNoteDeleted(msg), nil
+	case noteMoved:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onNoteMoved(msg), nil
+	case projectAdded:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onProjectAdded(msg)
+	case projectArchived:
+		if msg.token != w.token {
+			return w, nil
+		}
+		return w.onProjectArchived(msg)
+	}
+	if w.popup != nil {
+		return w.updatePopup(msg)
+	}
+	if w.editor != nil {
+		return w.updateEditor(msg)
 	}
 	msg2, ok := msg.(tea.KeyPressMsg)
 	if !ok {
@@ -167,6 +218,20 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 		w.setFocus([]focusArea{focusNotes, focusMain, focusAccount, focusProjects}[w.focus])
 	case key.Matches(msg2, k.Refresh):
 		return w, w.refresh()
+	case key.Matches(msg2, k.New) && w.onNotes():
+		return w, w.startNewNote()
+	case key.Matches(msg2, k.Edit) && w.onNotes():
+		w.startEdit()
+	case key.Matches(msg2, k.Move) && w.onNotes():
+		w.startMove()
+	case key.Matches(msg2, k.Delete) && w.onNotes():
+		w.startDelete()
+	case key.Matches(msg2, k.NewProject) && w.focus == focusProjects:
+		w.startNewProject()
+	case key.Matches(msg2, k.Archive) && w.focus == focusProjects:
+		return w, w.startArchiveToggle(true)
+	case key.Matches(msg2, k.Unarchive) && w.focus == focusProjects:
+		return w, w.startArchiveToggle(false)
 	case key.Matches(msg2, k.Open) && w.focus != focusMain:
 		// Enter drills in: a project to its notes, a note or the account
 		// line to the main panel.
@@ -182,6 +247,43 @@ func (w workspaceModel) Update(msg tea.Msg) (workspaceModel, tea.Cmd) {
 		return w.updateFocused(msg2)
 	}
 	return w, nil
+}
+
+// onNotes reports whether note actions apply: the notes panel, or the main
+// panel while it shows a note.
+func (w workspaceModel) onNotes() bool {
+	return w.focus == focusNotes || (w.focus == focusMain && w.back != focusAccount)
+}
+
+// updatePopup passes a message to the open popup and acts on its outcome.
+func (w workspaceModel) updatePopup(msg tea.Msg) (workspaceModel, tea.Cmd) {
+	p, cmd, outcome := w.popup.Update(msg, w.keys)
+	w.popup = &p
+	switch outcome {
+	case popupAccepted:
+		return w, tea.Batch(cmd, w.acceptPopup())
+	case popupCancelled:
+		w.popup = nil
+	}
+	return w, cmd
+}
+
+// updateEditor passes a message to the note editor and acts on its outcome.
+func (w workspaceModel) updateEditor(msg tea.Msg) (workspaceModel, tea.Cmd) {
+	e, cmd, outcome := w.editor.Update(msg, w.keys)
+	w.editor = &e
+	switch outcome {
+	case editorSave:
+		return w, w.saveEdit()
+	case editorCancel:
+		if e.changed() {
+			w.popup = newConfirm("Discard changes", "Discard your changes to “"+e.title+"”?", "discard", true, pendingAction{kind: discardEditAction})
+			return w, nil
+		}
+		w.editor = nil
+		w.setFocus(w.back)
+	}
+	return w, cmd
 }
 
 // updateFocused passes a key to the focused panel and keeps the panels to
@@ -266,19 +368,26 @@ func (w workspaceModel) View(spinner string) string {
 		w.notes.View(leftWidth, notesHeight, w.focus == focusNotes, spinner),
 	)
 	main := w.mainView(mainWidth, spinner)
+	view := lipgloss.JoinHorizontal(lipgloss.Top, left, main)
 	if w.width < narrowWidth {
+		view = left
 		if w.focus == focusMain {
-			return main
+			view = main
 		}
-		return left
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, main)
+	if w.popup != nil {
+		view = overlay(view, w.popup.View(w.width, w.height, spinner), w.width, w.height)
+	}
+	return view
 }
 
 // mainView is the account page while the account is in view, and otherwise
 // the note selected in panel [3].
 func (w workspaceModel) mainView(width int, spinner string) string {
 	focused := w.focus == focusMain
+	if w.editor != nil {
+		return w.editor.View(width, w.height, spinner)
+	}
 	if w.focus == focusAccount || (focused && w.back == focusAccount) {
 		return w.account.page(width, w.height, focused, w.accountState, spinner, time.Now())
 	}
@@ -291,6 +400,8 @@ type workspaceKeyMap struct {
 	PrevTab, NextTab, NextPanel, PrevPanel             key.Binding
 	FocusMain, FocusAccount, FocusProjects, FocusNotes key.Binding
 	Open, Back, Refresh, Quit                          key.Binding
+	New, Edit, Move, Delete, NewProject, Archive       key.Binding
+	Unarchive, Save, Yes, No                           key.Binding
 }
 
 func defaultWorkspaceKeys() workspaceKeyMap {
@@ -310,22 +421,52 @@ func defaultWorkspaceKeys() workspaceKeyMap {
 		Open:          bind("enter", "open", "enter"),
 		Back:          bind("esc", "back", "esc"),
 		Refresh:       bind("r", "refresh", "r"),
+		New:           bind("n", "new", "n"),
+		Edit:          bind("e", "edit", "e"),
+		Move:          bind("v", "move", "v"),
+		Delete:        bind("d", "delete", "d"),
+		NewProject:    bind("a", "new project", "a"),
+		Archive:       bind("x", "archive", "x"),
+		Unarchive:     bind("u", "unarchive", "u"),
+		Save:          bind("ctrl+s", "save", "ctrl+s"),
+		Yes:           bind("y", "yes", "y", "Y"),
+		No:            bind("n/esc", "no", "n", "N", "esc"),
 		Quit:          bind("q", "quit", "q"),
 	}
 }
 
-// ShortHelp lists the footer hints for the focused area, most useful first.
+// ShortHelp lists the footer hints for what has the keys, most useful first:
+// an open popup, the editor, or the focused panel.
 func (w workspaceModel) ShortHelp() []key.Binding {
 	k := w.keys
+	if w.popup != nil {
+		return w.popup.ShortHelp(k)
+	}
+	if w.editor != nil {
+		return w.editor.ShortHelp()
+	}
 	panels := bind("0-3", "panels", "0", "1", "2", "3")
+	writable := !w.readOnly(w.visibleSource())
 	switch w.focus {
 	case focusProjects:
-		return []key.Binding{keySelect, bind("[/]", "active/archived", "[", "]"), bind("enter", "notes", "enter"), k.Refresh, panels, k.Quit}
+		if w.projects.tab == archivedTab {
+			return []key.Binding{k.Unarchive, keySelect, bind("[/]", "active/archived", "[", "]"), bind("enter", "notes", "enter"), k.Refresh, panels, k.Quit}
+		}
+		return []key.Binding{k.NewProject, k.Archive, keySelect, bind("[/]", "active/archived", "[", "]"), bind("enter", "notes", "enter"), k.Refresh, panels, k.Quit}
 	case focusNotes:
 		tabs := bind("[/]", "inbox/project", "[", "]")
-		return []key.Binding{keySelect, tabs, bind("enter", "read", "enter"), k.Refresh, panels, k.Quit}
+		if !writable {
+			return []key.Binding{keySelect, tabs, bind("enter", "read", "enter"), k.Refresh, panels, k.Quit}
+		}
+		return []key.Binding{k.New, k.Edit, k.Move, k.Delete, keySelect, tabs, bind("enter", "read", "enter"), k.Refresh, panels, k.Quit}
 	case focusMain:
-		return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
+		if w.back == focusAccount {
+			return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, k.Refresh, panels, k.Quit}
+		}
+		if !writable {
+			return []key.Binding{bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
+		}
+		return []key.Binding{k.Edit, k.New, bind("↑/↓", "scroll", "up", "down"), k.Back, panels, k.Quit}
 	}
 	return []key.Binding{bind("enter", "account page", "enter"), k.Refresh, panels, k.Quit}
 }

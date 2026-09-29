@@ -24,8 +24,12 @@ After sign-in, the CLI saves the session in your OS credential store (macOS Keyc
 
 After sign-in the workspace opens, laid out like lazygit: on the left, `[1]` Account, `[2]` Projects (with Active and Archived tabs), and `[3]` Notes (with the Inbox and the selected project as tabs); on the right, `[0]` shows the selected note. Move between panels with `0`–`3` or `Tab`, within a panel with `j`/`k` or the arrow keys (`PgUp`/`PgDn` page), and switch a panel's tabs with `[` and `]`. `Enter` opens: a project's notes, a note in the reader, or your account page from `[1]`; `Esc` goes back. Selecting a project loads its notes, and older notes load automatically as you near the end of a list. `r` reloads the focused panel; if something fails to load, the panel says so and `r` retries. On terminals narrower than 70 columns, one column shows at a time.
 
-The workspace is being built in steps and is read-only for now. Creating, editing, moving, and deleting notes, managing projects, and the account actions (editing your profile, revoking sessions, signing out, and deleting your account) return in the next steps.
+In the Notes panel (or with a note open), `n` writes a new note in a popup, into whichever tab is showing: the Inbox or the project. `Ctrl+S` saves it; `Esc` asks before throwing away what you wrote. `e` edits the note in place in the main panel, `v` moves it to the Inbox or another active project, and `d` deletes it permanently after you confirm (there is no Trash). In the Projects panel, `a` creates a project, `x` archives the selected one after you confirm, and `u` unarchives it from the Archived tab. Archived projects are read-only: their notes can be read, but not added to, edited, moved, or deleted until the project is unarchived.
 
-To try the workspace without a server, run `go run ./cmd/shortlog -demo`. It opens with sample data; nothing is sent anywhere.
+If a save cannot be confirmed (for example, the connection drops), your text stays in the popup or editor; check the note list before retrying to avoid a duplicate. If the session has expired, the CLI signs you out and reopens your unsaved text once you sign in again. `Ctrl+C` asks before quitting if you have unsaved text.
+
+Account actions (editing your profile, revoking sessions, signing out, and deleting your account) return in the next step.
+
+To try the workspace without a server, run `go run ./cmd/shortlog -demo`. It opens with sample data, and your changes last until you quit; nothing is sent anywhere.
 
 Run tests with `go test ./...`.

@@ -19,30 +19,31 @@ type demoAPI struct {
 	archived []api.Project
 	inbox    []api.Note
 	notes    map[string][]api.Note // by project ID
+	nextID   int
 }
 
-func (d demoAPI) Me(context.Context, string) (api.Account, error) { return d.account, nil }
-func (d demoAPI) Sessions(context.Context, string) ([]api.Session, error) {
+func (d *demoAPI) Me(context.Context, string) (api.Account, error) { return d.account, nil }
+func (d *demoAPI) Sessions(context.Context, string) ([]api.Session, error) {
 	return d.sessions, nil
 }
-func (d demoAPI) Projects(context.Context, string) ([]api.Project, error) { return d.active, nil }
-func (d demoAPI) ArchivedProjects(context.Context, string) ([]api.Project, error) {
+func (d *demoAPI) Projects(context.Context, string) ([]api.Project, error) { return d.active, nil }
+func (d *demoAPI) ArchivedProjects(context.Context, string) ([]api.Project, error) {
 	return d.archived, nil
 }
-func (d demoAPI) Inbox(context.Context, string) (api.NotesPage, error) {
+func (d *demoAPI) Inbox(context.Context, string) (api.NotesPage, error) {
 	return api.NotesPage{Items: d.inbox}, nil
 }
-func (d demoAPI) InboxPage(context.Context, string, string) (api.NotesPage, error) {
+func (d *demoAPI) InboxPage(context.Context, string, string) (api.NotesPage, error) {
 	return api.NotesPage{}, nil
 }
-func (d demoAPI) ProjectNotes(_ context.Context, _, id string) (api.NotesPage, error) {
+func (d *demoAPI) ProjectNotes(_ context.Context, _, id string) (api.NotesPage, error) {
 	return api.NotesPage{Items: d.notes[id]}, nil
 }
-func (d demoAPI) ProjectNotesPage(context.Context, string, string, string) (api.NotesPage, error) {
+func (d *demoAPI) ProjectNotesPage(context.Context, string, string, string) (api.NotesPage, error) {
 	return api.NotesPage{}, nil
 }
 
-func newDemoAPI(now time.Time) demoAPI {
+func newDemoAPI(now time.Time) *demoAPI {
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 	day := 24 * time.Hour
 	archived := ago(40 * day)
@@ -54,7 +55,8 @@ func newDemoAPI(now time.Time) demoAPI {
 	note := func(id, content string, age time.Duration) api.Note {
 		return api.Note{ID: id, Content: content, CreatedAt: ago(age)}
 	}
-	return demoAPI{
+	return &demoAPI{
+		nextID:  1,
 		account: api.Account{ID: "demo", Username: "Ari", TimeZone: "Europe/London", CreatedAt: ago(200 * day)},
 		sessions: []api.Session{
 			{ID: "s1", DeviceLabel: "MacBook Pro", Current: true, LastUsedAt: now},
@@ -86,4 +88,123 @@ func newDemoAPI(now time.Time) demoAPI {
 			"a1": {note("x1", "Venue shortlist and catering quotes", 60*day)},
 		},
 	}
+}
+
+// The demo's changes live in memory for the run, so every workspace action
+// can be tried without a server.
+
+func (d *demoAPI) id(prefix string) string {
+	d.nextID++
+	return fmt.Sprintf("%s-demo-%d", prefix, d.nextID)
+}
+
+func (d *demoAPI) CreateInboxNote(_ context.Context, _, content string) (api.Note, error) {
+	note := api.Note{ID: d.id("n"), Content: content, CreatedAt: time.Now()}
+	d.inbox = append([]api.Note{note}, d.inbox...)
+	return note, nil
+}
+
+func (d *demoAPI) CreateProjectNote(_ context.Context, _, projectID, content string) (api.Note, error) {
+	id := projectID
+	note := api.Note{ID: d.id("n"), Content: content, ProjectID: &id, CreatedAt: time.Now()}
+	d.notes[projectID] = append([]api.Note{note}, d.notes[projectID]...)
+	return note, nil
+}
+
+// find returns the list holding a note, by source, and its index.
+func (d *demoAPI) find(id string) (string, int) {
+	for i, note := range d.inbox {
+		if note.ID == id {
+			return inboxSource, i
+		}
+	}
+	for source, notes := range d.notes {
+		for i, note := range notes {
+			if note.ID == id {
+				return source, i
+			}
+		}
+	}
+	return "", -1
+}
+
+func (d *demoAPI) UpdateNote(_ context.Context, _, id, content string) (api.Note, error) {
+	source, i := d.find(id)
+	if i < 0 {
+		return api.Note{}, &api.Error{Status: 404, Code: "not_found"}
+	}
+	if source == inboxSource {
+		d.inbox[i].Content = content
+		return d.inbox[i], nil
+	}
+	d.notes[source][i].Content = content
+	return d.notes[source][i], nil
+}
+
+func (d *demoAPI) remove(id string) (api.Note, bool) {
+	source, i := d.find(id)
+	if i < 0 {
+		return api.Note{}, false
+	}
+	if source == inboxSource {
+		note := d.inbox[i]
+		d.inbox = append(d.inbox[:i:i], d.inbox[i+1:]...)
+		return note, true
+	}
+	note := d.notes[source][i]
+	d.notes[source] = append(d.notes[source][:i:i], d.notes[source][i+1:]...)
+	return note, true
+}
+
+func (d *demoAPI) MoveNote(_ context.Context, _, id, projectID string) (api.Note, error) {
+	note, ok := d.remove(id)
+	if !ok {
+		return api.Note{}, &api.Error{Status: 404, Code: "not_found"}
+	}
+	if projectID == "" {
+		note.ProjectID = nil
+		d.inbox = insertNote(d.inbox, note)
+		return note, nil
+	}
+	note.ProjectID = &projectID
+	d.notes[projectID] = insertNote(d.notes[projectID], note)
+	return note, nil
+}
+
+func (d *demoAPI) DeleteNote(_ context.Context, _, id string) error {
+	if _, ok := d.remove(id); !ok {
+		return &api.Error{Status: 404, Code: "not_found"}
+	}
+	return nil
+}
+
+func (d *demoAPI) CreateProject(_ context.Context, _, name string) (api.Project, error) {
+	p := api.Project{ID: d.id("p"), Name: name}
+	d.active = append([]api.Project{p}, d.active...)
+	return p, nil
+}
+
+func (d *demoAPI) ArchiveProject(_ context.Context, _, id string) error {
+	for i, p := range d.active {
+		if p.ID == id {
+			now := time.Now()
+			p.ArchivedAt = &now
+			d.active = append(d.active[:i:i], d.active[i+1:]...)
+			d.archived = append([]api.Project{p}, d.archived...)
+			return nil
+		}
+	}
+	return &api.Error{Status: 404, Code: "not_found"}
+}
+
+func (d *demoAPI) UnarchiveProject(_ context.Context, _, id string) error {
+	for i, p := range d.archived {
+		if p.ID == id {
+			p.ArchivedAt = nil
+			d.archived = append(d.archived[:i:i], d.archived[i+1:]...)
+			d.active = append([]api.Project{p}, d.active...)
+			return nil
+		}
+	}
+	return &api.Error{Status: 404, Code: "not_found"}
 }
