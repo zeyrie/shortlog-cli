@@ -31,9 +31,17 @@ type fakeAPI struct {
 	updated   []string
 	deleteErr error
 	deleted   []string
+	moveErr   error
+	moved     []string
 
 	projectList      []api.Project
+	archivedList     []api.Project
 	projectsErr      error
+	archivedErr      error
+	archiveErr       error
+	unarchiveErr     error
+	archiveCalls     []string
+	unarchiveCalls   []string
 	createProjectErr error
 	projectNotes     []api.Note
 	projectNext      *string
@@ -113,8 +121,66 @@ func (f *fakeAPI) DeleteNote(_ context.Context, _, id string) error {
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
+func (f *fakeAPI) MoveNote(_ context.Context, _, id, projectID string) (api.Note, error) {
+	f.moved = append(f.moved, id+":"+projectID)
+	if f.moveErr != nil {
+		return api.Note{}, f.moveErr
+	}
+	for _, source := range []*[]api.Note{&f.notes, &f.projectNotes} {
+		for i, note := range *source {
+			if note.ID != id {
+				continue
+			}
+			*source = append(append([]api.Note(nil), (*source)[:i]...), (*source)[i+1:]...)
+			note.ProjectID = nil
+			if projectID != "" {
+				target := projectID
+				note.ProjectID = &target
+				f.projectNotes = append([]api.Note{note}, f.projectNotes...)
+			} else {
+				f.notes = append([]api.Note{note}, f.notes...)
+			}
+			return note, nil
+		}
+	}
+	return api.Note{ID: id}, nil
+}
 func (f *fakeAPI) Projects(_ context.Context, _ string) ([]api.Project, error) {
 	return f.projectList, f.projectsErr
+}
+func (f *fakeAPI) ArchivedProjects(_ context.Context, _ string) ([]api.Project, error) {
+	return f.archivedList, f.archivedErr
+}
+func (f *fakeAPI) ArchiveProject(_ context.Context, _, id string) error {
+	f.archiveCalls = append(f.archiveCalls, id)
+	if f.archiveErr != nil {
+		return f.archiveErr
+	}
+	for i, project := range f.projectList {
+		if project.ID == id {
+			f.projectList = append(append([]api.Project(nil), f.projectList[:i]...), f.projectList[i+1:]...)
+			now := time.Now()
+			project.ArchivedAt = &now
+			f.archivedList = append([]api.Project{project}, f.archivedList...)
+			break
+		}
+	}
+	return nil
+}
+func (f *fakeAPI) UnarchiveProject(_ context.Context, _, id string) error {
+	f.unarchiveCalls = append(f.unarchiveCalls, id)
+	if f.unarchiveErr != nil {
+		return f.unarchiveErr
+	}
+	for i, project := range f.archivedList {
+		if project.ID == id {
+			f.archivedList = append(append([]api.Project(nil), f.archivedList[:i]...), f.archivedList[i+1:]...)
+			project.ArchivedAt = nil
+			f.projectList = append([]api.Project{project}, f.projectList...)
+			break
+		}
+	}
+	return nil
 }
 func (f *fakeAPI) CreateProject(_ context.Context, _, name string) (api.Project, error) {
 	if f.createProjectErr != nil {
@@ -701,6 +767,286 @@ func TestCreateProjectFailureKeepsForm(t *testing.T) {
 	m = next.(Model)
 	if m.stage != newProjectStage || m.inputs[projectNameInput].Value() != "Nope" || !strings.Contains(m.View(), "1–120") {
 		t.Fatal("failed creation lost the form")
+	}
+}
+
+func TestMoveInboxNoteFromReaderAndCancel(t *testing.T) {
+	cursor := "older-inbox"
+	f := &fakeAPI{
+		projectList: []api.Project{{ID: "p1", Name: "Work"}, {ID: "p2", Name: "Home"}},
+		notes:       []api.Note{{ID: "one", Content: "first"}, {ID: "two", Content: "second"}},
+		next:        &cursor,
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m.notes = append([]api.Note(nil), f.notes...)
+	m.nextCursor = cursor
+	m.selected = 1
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if m.stage != moveStage || !m.busy || cmd == nil {
+		t.Fatal("move picker not opened from reader")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if len(m.moveTargets) != 2 || m.moveTargets[0].id != "p1" || m.moveTargets[1].id != "p2" || strings.Contains(m.View(), "Inbox\n\nInbox") {
+		t.Fatal("Inbox picker has wrong targets")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != readingStage || len(f.moved) != 0 {
+		t.Fatal("Esc did not cancel move")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || !m.busy || len(f.moved) != 0 {
+		t.Fatal("move was not asynchronous")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != inboxStage || len(m.notes) != 1 || m.notes[0].ID != "one" || m.selected != 0 || m.nextCursor != cursor || len(f.moved) != 1 || f.moved[0] != "two:p2" || len(f.projectNotes) != 1 {
+		t.Fatalf("move failed: notes=%+v moved=%v", m.notes, f.moved)
+	}
+}
+
+func TestMoveProjectNoteToInboxRefreshesStaleSnapshot(t *testing.T) {
+	f := &fakeAPI{
+		projectList:  []api.Project{{ID: "p1", Name: "Work"}, {ID: "p2", Name: "Other"}},
+		projectNotes: []api.Note{{ID: "project-one", Content: "from project"}, {ID: "project-two", Content: "stay"}},
+		notes:        []api.Note{{ID: "inbox-one", Content: "old inbox"}},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m.notes = append([]api.Note(nil), f.notes...)
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.activeProject == nil || !m.inboxStashed {
+		t.Fatal("project did not open with Inbox stashed")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.moveTargets) != 2 || m.moveTargets[0].name != "Inbox" || m.moveTargets[1].id != "p2" {
+		t.Fatal("project picker failed to exclude source project")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != inboxStage || len(m.notes) != 1 || m.notes[0].ID != "project-two" || !m.inboxNeedsRefresh || f.moved[0] != "project-one:" {
+		t.Fatal("move to Inbox failed or snapshot not invalidated")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != projectsStage {
+		t.Fatal("did not return to project list")
+	}
+	// Visiting a second project must not re-stash the old Inbox.
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, other := press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(other())
+	m = next.(Model)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if !m.inboxNeedsRefresh {
+		t.Fatal("visiting another project cleared Inbox invalidation")
+	}
+	m, reload := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if reload == nil || !m.busy {
+		t.Fatal("stale Inbox snapshot used instead of fetching")
+	}
+	next, _ = m.Update(reload())
+	m = next.(Model)
+	if len(m.notes) != 2 || m.notes[0].ID != "project-one" {
+		t.Fatal("moved note missing from Inbox")
+	}
+}
+
+func TestMoveFailureAndNoDestinationKeepNote(t *testing.T) {
+	f := &fakeAPI{notes: []api.Note{{ID: "one", Content: "keep me"}}}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = inboxStage, false, "token"
+	m.notes = append([]api.Note(nil), f.notes...)
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if len(m.moveTargets) != 0 || !strings.Contains(m.View(), "No other active locations") {
+		t.Fatal("empty destination picker is unclear")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || len(f.moved) != 0 || len(m.notes) != 1 {
+		t.Fatal("move sent without destination")
+	}
+	f.projectList = []api.Project{{ID: "p1", Name: "Work"}}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	f.moveErr = &api.Error{Status: 409, Code: "conflict"}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != moveStage || len(m.notes) != 1 || m.notes[0].ID != "one" || !strings.Contains(m.View(), "archived") {
+		t.Fatal("failed move lost note or picker")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != inboxStage || len(m.notes) != 1 {
+		t.Fatal("cancel after failure lost note")
+	}
+}
+
+func TestArchiveBrowseReadOnlyAndUnarchive(t *testing.T) {
+	cursor := "older-archived-notes"
+	f := &fakeAPI{
+		projectList:  []api.Project{{ID: "p1", Name: "Work"}, {ID: "p2", Name: "Personal"}},
+		projectNotes: []api.Note{{ID: "n1", Content: "historical note"}},
+		projectNext:  &cursor,
+		projectPages: map[string]api.NotesPage{cursor: {Items: []api.Note{{ID: "n2", Content: "older"}}}},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m.projects = append([]api.Project(nil), f.projectList...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if m.stage != archiveStage || len(f.archiveCalls) != 0 || !strings.Contains(m.View(), "cannot edit") {
+		t.Fatal("archive did not require an informative confirmation")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != projectsStage || len(f.archiveCalls) != 0 {
+		t.Fatal("cancel archived the project")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !m.busy || cmd == nil || len(f.archiveCalls) != 0 {
+		t.Fatal("archive not asynchronous")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != projectsStage || m.busy || len(m.projects) != 1 || m.projects[0].ID != "p2" || f.archiveCalls[0] != "p1" {
+		t.Fatal("archived project not removed from active list")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if !m.showArchived || !m.busy || cmd == nil {
+		t.Fatal("t did not switch to archived")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.projects) != 1 || m.projects[0].ArchivedAt == nil || !strings.Contains(m.View(), "Archived projects") {
+		t.Fatal("archived list did not load")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !m.archivedProject() || !strings.Contains(m.View(), "read-only") || m.nextCursor != cursor {
+		t.Fatal("archived project did not open read-only")
+	}
+	for _, key := range []rune{'n', 'e', 'd', 'v'} {
+		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		if cmd != nil || m.stage != inboxStage || len(f.created)+len(f.updated)+len(f.deleted)+len(f.moved) != 0 {
+			t.Fatalf("archived note write key %c was not blocked", key)
+		}
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.notes) != 2 {
+		t.Fatal("archived notes pagination failed")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.stage != readingStage || !strings.Contains(m.View(), "historical note") {
+		t.Fatal("archived note not readable")
+	}
+	for _, key := range []rune{'e', 'd', 'v'} {
+		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		if cmd != nil || m.stage != readingStage {
+			t.Fatalf("archived reader write key %c was not blocked", key)
+		}
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.stage != projectsStage || !m.showArchived {
+		t.Fatal("return from archived notes lost list state")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if !m.busy || cmd == nil {
+		t.Fatal("unarchive not dispatched")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.stage != projectsStage || len(m.projects) != 0 || f.unarchiveCalls[0] != "p1" {
+		t.Fatal("unarchived project not removed from archived list")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.showArchived || len(m.projects) != 2 {
+		t.Fatal("active projects did not show unarchived project")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.archivedProject() {
+		t.Fatal("unarchived project remained read-only")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.stage != captureStage || cmd == nil {
+		t.Fatal("unarchived project did not allow note creation")
+	}
+}
+
+func TestArchiveFailureKeepsListAndSelection(t *testing.T) {
+	f := &fakeAPI{projectList: []api.Project{{ID: "p1", Name: "Work"}}, archiveErr: errors.New("offline")}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m.projects = append([]api.Project(nil), f.projectList...)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != projectsStage || len(m.projects) != 1 || m.projectSelected != 0 || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("failed archive lost project list")
+	}
+}
+
+func TestUnarchiveFailureKeepsArchivedList(t *testing.T) {
+	now := time.Now()
+	f := &fakeAPI{archivedList: []api.Project{{ID: "p1", Name: "Old", ArchivedAt: &now}}, unarchiveErr: errors.New("offline")}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token, m.showArchived = projectsStage, false, "token", true
+	m.projects = append([]api.Project(nil), f.archivedList...)
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if m.stage != projectsStage || len(m.projects) != 1 || !m.showArchived || m.projects[0].ID != "p1" || !strings.Contains(m.View(), "not confirmed") {
+		t.Fatal("failed unarchive lost archived project")
+	}
+}
+
+func TestMoveTargetsRemainActiveWhenViewingArchivedProjects(t *testing.T) {
+	now := time.Now()
+	f := &fakeAPI{
+		projectList:  []api.Project{{ID: "active", Name: "Active"}},
+		archivedList: []api.Project{{ID: "archived", Name: "Archived", ArchivedAt: &now}},
+		notes:        []api.Note{{ID: "note", Content: "move me"}},
+	}
+	m := New(f, &fakeStore{})
+	m.stage, m.busy, m.token = projectsStage, false, "token"
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+	if !m.showArchived || len(m.projects) != 1 || m.projects[0].ID != "archived" {
+		t.Fatal("setup failed")
+	}
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.moveTargets) != 1 || m.moveTargets[0].id != "active" || m.projects[0].ID != "archived" {
+		t.Fatal("archived project leaked into move targets or changed archived list")
 	}
 }
 

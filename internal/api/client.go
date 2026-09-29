@@ -118,6 +118,7 @@ func (c *Client) Me(ctx context.Context, token string) (Account, error) {
 type Note struct {
 	ID        string    `json:"id"`
 	Content   string    `json:"content"`
+	ProjectID *string   `json:"project_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -127,14 +128,29 @@ type NotesPage struct {
 }
 
 type Project struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	ArchivedAt *time.Time `json:"archived_at"`
 }
 
 func (c *Client) Projects(ctx context.Context, token string) ([]Project, error) {
 	var projects []Project
 	err := c.get(ctx, "/v1/projects", token, &projects)
 	return projects, err
+}
+
+func (c *Client) ArchivedProjects(ctx context.Context, token string) ([]Project, error) {
+	var projects []Project
+	err := c.get(ctx, "/v1/projects?status=archived", token, &projects)
+	return projects, err
+}
+
+func (c *Client) ArchiveProject(ctx context.Context, token, id string) error {
+	return c.writeNote(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(id)+"/archive", token, nil, nil, http.StatusNoContent)
+}
+
+func (c *Client) UnarchiveProject(ctx context.Context, token, id string) error {
+	return c.writeNote(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(id)+"/unarchive", token, nil, nil, http.StatusNoContent)
 }
 
 func (c *Client) CreateProject(ctx context.Context, token, name string) (Project, error) {
@@ -197,6 +213,19 @@ func (c *Client) CreateInboxNote(ctx context.Context, token, content string) (No
 func (c *Client) UpdateNote(ctx context.Context, token, id, content string) (Note, error) {
 	var result Note
 	err := c.writeNote(ctx, http.MethodPatch, "/v1/notes/"+url.PathEscape(id), token, map[string]string{"content": content}, &result, http.StatusOK)
+	if err == nil && result.ID != id {
+		err = errors.New("invalid API response: mismatched note ID")
+	}
+	return result, err
+}
+
+func (c *Client) MoveNote(ctx context.Context, token, id, projectID string) (Note, error) {
+	var destination any
+	if projectID != "" {
+		destination = projectID
+	}
+	var result Note
+	err := c.writeNote(ctx, http.MethodPatch, "/v1/notes/"+url.PathEscape(id), token, map[string]any{"project_id": destination}, &result, http.StatusOK)
 	if err == nil && result.ID != id {
 		err = errors.New("invalid API response: mismatched note ID")
 	}

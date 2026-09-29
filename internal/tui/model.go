@@ -27,11 +27,15 @@ type emailAPI interface {
 	InboxPage(context.Context, string, string) (api.NotesPage, error)
 	CreateInboxNote(context.Context, string, string) (api.Note, error)
 	Projects(context.Context, string) ([]api.Project, error)
+	ArchivedProjects(context.Context, string) ([]api.Project, error)
+	ArchiveProject(context.Context, string, string) error
+	UnarchiveProject(context.Context, string, string) error
 	CreateProject(context.Context, string, string) (api.Project, error)
 	ProjectNotes(context.Context, string, string) (api.NotesPage, error)
 	ProjectNotesPage(context.Context, string, string, string) (api.NotesPage, error)
 	CreateProjectNote(context.Context, string, string, string) (api.Note, error)
 	UpdateNote(context.Context, string, string, string) (api.Note, error)
+	MoveNote(context.Context, string, string, string) (api.Note, error)
 	DeleteNote(context.Context, string, string) error
 }
 
@@ -56,7 +60,14 @@ const (
 	deleteStage
 	projectsStage
 	newProjectStage
+	moveStage
+	archiveStage
 )
+
+type moveTarget struct {
+	id   string // Empty ID represents the Inbox.
+	name string
+}
 
 // noteList snapshots the Inbox while a project's notes are open.
 type noteList struct {
@@ -66,38 +77,45 @@ type noteList struct {
 }
 
 type Model struct {
-	api              emailAPI
-	store            sessionStore
-	stage            stage
-	inputs           [5]textinput.Model
-	focus            int
-	challenge        string
-	ticket           string
-	token            string // Never rendered or logged.
-	email            string
-	username         string
-	notes            []api.Note
-	inboxList        noteList
-	activeProject    *api.Project
-	inboxStashed     bool
-	projects         []api.Project
-	projectSelected  int
-	nextCursor       string
-	selected         int
-	reader           viewport.Model
-	draft            textarea.Model
-	editorID         string
-	editorStart      string
-	editorBack       stage
-	deleteID         string
-	deleteBack       stage
-	quitAfterDiscard bool
-	resumeDraft      bool
-	selectID         string
-	busy             bool
-	message          string
-	width            int
-	height           int
+	api               emailAPI
+	store             sessionStore
+	stage             stage
+	inputs            [5]textinput.Model
+	focus             int
+	challenge         string
+	ticket            string
+	token             string // Never rendered or logged.
+	email             string
+	username          string
+	notes             []api.Note
+	inboxList         noteList
+	activeProject     *api.Project
+	inboxStashed      bool
+	inboxNeedsRefresh bool
+	projects          []api.Project
+	projectSelected   int
+	showArchived      bool
+	archiveID         string
+	nextCursor        string
+	selected          int
+	reader            viewport.Model
+	draft             textarea.Model
+	editorID          string
+	editorStart       string
+	editorBack        stage
+	deleteID          string
+	deleteBack        stage
+	moveID            string
+	moveBack          stage
+	moveTargets       []moveTarget
+	moveSelected      int
+	quitAfterDiscard  bool
+	resumeDraft       bool
+	selectID          string
+	busy              bool
+	message           string
+	width             int
+	height            int
 }
 
 const (
@@ -195,9 +213,19 @@ type projectsResult struct {
 	projects []api.Project
 	err      error
 }
+type projectArchiveResult struct {
+	id       string
+	archived bool
+	err      error
+}
 type projectCreated struct {
 	project api.Project
 	err     error
+}
+type movedNote struct {
+	note        api.Note
+	destination moveTarget
+	err         error
 }
 
 func (m Model) fetchNotes(ctx context.Context, token string) (api.NotesPage, error) {
@@ -216,7 +244,13 @@ func (m Model) fetchOlder(ctx context.Context, token, cursor string) (api.NotesP
 
 func (m Model) fetchProjects() tea.Cmd {
 	return func() tea.Msg {
-		projects, err := m.api.Projects(context.Background(), m.token)
+		var projects []api.Project
+		var err error
+		if m.stage == projectsStage && m.showArchived {
+			projects, err = m.api.ArchivedProjects(context.Background(), m.token)
+		} else {
+			projects, err = m.api.Projects(context.Background(), m.token)
+		}
 		return projectsResult{projects, err}
 	}
 }
@@ -281,7 +315,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
-			m.message = "Could not load projects. Press r to retry."
+			if m.stage == moveStage {
+				m.message = "Could not load destinations. Press r to retry or Esc to cancel."
+			} else {
+				m.message = "Could not load projects. Press r to retry."
+			}
+			return m, nil
+		}
+		if m.stage == moveStage {
+			m.moveTargets = nil
+			if m.activeProject != nil {
+				m.moveTargets = append(m.moveTargets, moveTarget{name: "Inbox"})
+			}
+			for _, project := range msg.projects {
+				if m.activeProject == nil || project.ID != m.activeProject.ID {
+					m.moveTargets = append(m.moveTargets, moveTarget{id: project.ID, name: project.Name})
+				}
+			}
+			m.moveSelected = 0
+			m.message = ""
 			return m, nil
 		}
 		m.projects = msg.projects
@@ -289,6 +341,38 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectSelected = max(0, len(m.projects)-1)
 		}
 		m.message = ""
+		return m, nil
+	case projectArchiveResult:
+		m.busy = false
+		m.stage = projectsStage
+		m.archiveID = ""
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			m.message = "Project change not confirmed. Press r to refresh the list before retrying."
+			return m, nil
+		}
+		for i, project := range m.projects {
+			if project.ID == msg.id {
+				m.projects = append(m.projects[:i], m.projects[i+1:]...)
+				if m.projectSelected >= len(m.projects) && m.projectSelected > 0 {
+					m.projectSelected--
+				}
+				break
+			}
+		}
+		if msg.archived {
+			m.message = "Project archived. Its notes are now read-only; press t to view archived projects."
+		} else {
+			m.message = "Project unarchived. Press t to view active projects."
+		}
 		return m, nil
 	case projectCreated:
 		m.busy = false
@@ -493,6 +577,46 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.message = "Note permanently deleted."
 		return m, nil
+	case movedNote:
+		m.busy = false
+		if msg.err != nil {
+			var apiErr *api.Error
+			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				_ = m.store.Delete()
+				m.token = ""
+				m.stage = emailStage
+				m.focusInput(emailInput)
+				m.message = "Session expired. Sign in again."
+				return m, nil
+			}
+			switch {
+			case errors.As(msg.err, &apiErr) && apiErr.Code == "conflict":
+				m.message = "A project may have been archived. Press r to reload destinations, or Esc then r to refresh notes."
+			case errors.As(msg.err, &apiErr) && apiErr.Code == "not_found":
+				m.message = "Note or destination not found. Press r to reload destinations, or Esc then r to refresh notes."
+			default:
+				m.message = "Move not confirmed. Press Esc then r to refresh notes before retrying."
+			}
+			return m, nil
+		}
+		m.stage = inboxStage
+		m.moveID = ""
+		m.moveTargets = nil
+		for i, note := range m.notes {
+			if note.ID == msg.note.ID {
+				m.notes = append(m.notes[:i], m.notes[i+1:]...)
+				if m.selected >= len(m.notes) && m.selected > 0 {
+					m.selected--
+				}
+				break
+			}
+		}
+		if m.activeProject != nil && msg.destination.id == "" {
+			// A moved note belongs in the Inbox; its earlier snapshot is stale.
+			m.inboxNeedsRefresh = true
+		}
+		m.message = "Note moved to " + safeText(msg.destination.name) + "."
+		return m, nil
 	case startResult:
 		m.busy = false
 		if msg.err != nil {
@@ -567,6 +691,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = m.deleteBack
 				m.deleteID = ""
 				return m, nil
+			case moveStage:
+				m.stage = m.moveBack
+				m.moveID = ""
+				m.moveTargets = nil
+				m.message = ""
+				return m, nil
 			case startupStage:
 				m.stage = emailStage
 				m.token = ""
@@ -603,6 +733,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputs[projectNameInput].Blur()
 				m.inputs[projectNameInput].SetValue("")
 				m.stage = projectsStage
+				return m, nil
+			case archiveStage:
+				m.archiveID = ""
+				m.stage = projectsStage
+				m.message = ""
 				return m, nil
 			}
 			m.message = ""
@@ -675,8 +810,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.loadInbox(m.token, false)
 			}
 		case inboxStage:
+			if m.archivedProject() {
+				switch msg.String() {
+				case "n", "e", "d", "v":
+					m.message = "Archived projects are read-only. Unarchive this project to change its notes."
+					return m, nil
+				}
+			}
 			switch msg.String() {
 			case "p":
+				if m.activeProject != nil {
+					m.activeProject = nil
+					m.notes = nil
+					m.nextCursor = ""
+					m.selected = 0
+				}
 				m.stage = projectsStage
 				m.busy = true
 				m.message = "Loading projects…"
@@ -707,6 +855,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.stage = deleteStage
 					m.message = ""
 				}
+			case "v":
+				if len(m.notes) > 0 {
+					return m, m.startMove(inboxStage)
+				}
 			case "q":
 				return m, tea.Quit
 			case "s":
@@ -714,8 +866,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.token = ""
 				m.notes = nil
 				m.activeProject = nil
+				m.projects = nil
+				m.projectSelected = 0
+				m.showArchived = false
 				m.inboxList = noteList{}
 				m.inboxStashed = false
+				m.inboxNeedsRefresh = false
 				m.busy = true
 				m.message = "Removing saved session…"
 				m.focusInput(emailInput)
@@ -741,6 +897,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case readingStage:
+			if m.archivedProject() {
+				switch msg.String() {
+				case "e", "d", "v":
+					m.message = "Archived projects are read-only. Unarchive this project to change its notes."
+					return m, nil
+				}
+			}
 			switch msg.String() {
 			case "q":
 				return m, tea.Quit
@@ -753,6 +916,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = deleteStage
 				m.message = ""
 				return m, nil
+			case "v":
+				return m, m.startMove(readingStage)
 			}
 			var cmd tea.Cmd
 			m.reader, cmd = m.reader.Update(msg)
@@ -837,6 +1002,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.projectSelected--
 				}
 			case "a":
+				if m.showArchived {
+					m.message = "Switch to Active projects before creating a project."
+					return m, nil
+				}
 				m.stage = newProjectStage
 				m.inputs[projectNameInput].SetValue("")
 				m.message = ""
@@ -848,6 +1017,30 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.busy = true
 				m.message = "Loading projects…"
 				return m, m.fetchProjects()
+			case "t":
+				m.showArchived = !m.showArchived
+				m.projects = nil
+				m.projectSelected = 0
+				m.busy = true
+				m.message = "Loading projects…"
+				return m, m.fetchProjects()
+			case "x":
+				if !m.showArchived && len(m.projects) > 0 {
+					m.archiveID = m.projects[m.projectSelected].ID
+					m.stage = archiveStage
+					m.message = ""
+				}
+				return m, nil
+			case "u":
+				if m.showArchived && len(m.projects) > 0 {
+					id := m.projects[m.projectSelected].ID
+					m.busy = true
+					m.message = "Unarchiving project…"
+					return m, func() tea.Msg {
+						return projectArchiveResult{id: id, err: m.api.UnarchiveProject(context.Background(), m.token, id)}
+					}
+				}
+				return m, nil
 			case "enter":
 				if len(m.projects) > 0 {
 					return m, m.openProject(m.projects[m.projectSelected])
@@ -874,6 +1067,51 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return projectCreated{project, err}
 				}
 			}
+		case moveStage:
+			switch msg.String() {
+			case "j", "down":
+				if m.moveSelected+1 < len(m.moveTargets) {
+					m.moveSelected++
+				}
+			case "k", "up":
+				if m.moveSelected > 0 {
+					m.moveSelected--
+				}
+			case "r":
+				m.busy = true
+				m.moveTargets = nil
+				m.message = "Loading destinations…"
+				return m, m.fetchProjects()
+			case "enter":
+				if len(m.moveTargets) == 0 {
+					m.message = "No destinations available. Create an active project first."
+					return m, nil
+				}
+				target := m.moveTargets[m.moveSelected]
+				m.busy = true
+				m.message = "Moving note…"
+				id := m.moveID
+				return m, func() tea.Msg {
+					note, err := m.api.MoveNote(context.Background(), m.token, id, target.id)
+					return movedNote{note: note, destination: target, err: err}
+				}
+			}
+			return m, nil
+		case archiveStage:
+			switch msg.String() {
+			case "n":
+				m.stage = projectsStage
+				m.archiveID = ""
+				return m, nil
+			case "y":
+				id := m.archiveID
+				m.busy = true
+				m.message = "Archiving project…"
+				return m, func() tea.Msg {
+					return projectArchiveResult{id: id, archived: true, err: m.api.ArchiveProject(context.Background(), m.token, id)}
+				}
+			}
+			return m, nil
 		}
 	}
 	if (m.stage <= profileStage || m.stage == newProjectStage) && !m.busy {
@@ -900,10 +1138,21 @@ func (m *Model) openEditor(id, content string, back stage) tea.Cmd {
 	return m.draft.Focus()
 }
 
+func (m *Model) startMove(back stage) tea.Cmd {
+	m.moveID = m.notes[m.selected].ID
+	m.moveBack = back
+	m.moveTargets = nil
+	m.moveSelected = 0
+	m.stage = moveStage
+	m.busy = true
+	m.message = "Loading destinations…"
+	return m.fetchProjects()
+}
+
 // openProject shows a project's notes. The Inbox list is snapshotted so it
 // can be restored without refetching when the user returns.
 func (m *Model) openProject(p api.Project) tea.Cmd {
-	if !m.inboxStashed {
+	if !m.inboxStashed && !m.inboxNeedsRefresh {
 		m.inboxList = noteList{notes: m.notes, cursor: m.nextCursor, selected: m.selected}
 		m.inboxStashed = true
 	}
@@ -922,7 +1171,7 @@ func (m *Model) openProject(p api.Project) tea.Cmd {
 func (m *Model) openInbox() tea.Cmd {
 	m.activeProject = nil
 	m.stage = inboxStage
-	if m.inboxStashed {
+	if m.inboxStashed && !m.inboxNeedsRefresh {
 		m.notes = m.inboxList.notes
 		m.nextCursor = m.inboxList.cursor
 		m.selected = m.inboxList.selected
@@ -931,6 +1180,9 @@ func (m *Model) openInbox() tea.Cmd {
 		m.message = ""
 		return nil
 	}
+	m.inboxList = noteList{}
+	m.inboxStashed = false
+	m.inboxNeedsRefresh = false
 	m.notes = nil
 	m.nextCursor = ""
 	m.selected = 0
@@ -944,6 +1196,10 @@ func (m Model) listTitle() string {
 		return safeText(m.activeProject.Name)
 	}
 	return "Inbox"
+}
+
+func (m Model) archivedProject() bool {
+	return m.activeProject != nil && m.activeProject.ArchivedAt != nil
 }
 
 func (m *Model) closeEditor(message string) {
@@ -969,8 +1225,12 @@ func (m *Model) signedIn(token string) tea.Cmd {
 	m.challenge = ""
 	m.inputs[codeInput].SetValue("")
 	m.activeProject = nil
+	m.projects = nil
+	m.projectSelected = 0
+	m.showArchived = false
 	m.inboxList = noteList{}
 	m.inboxStashed = false
+	m.inboxNeedsRefresh = false
 	m.stage = inboxStage
 	m.busy = true
 	m.message = "Loading Inbox…"
@@ -1080,6 +1340,9 @@ func (m Model) View() string {
 		body = "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
 	case inboxStage:
 		body = m.listTitle()
+		if m.archivedProject() {
+			body += " · archived (read-only)"
+		}
 		if m.activeProject == nil && m.username != "" {
 			body += " · " + safeText(m.username)
 		}
@@ -1105,9 +1368,18 @@ func (m Model) View() string {
 		} else if len(m.notes) > 0 {
 			body += fmt.Sprintf("\n%s", dimStyle.Render(fmt.Sprintf("%d loaded · end of %s", len(m.notes), m.listTitle())))
 		}
-		body += "\n" + dimStyle.Render("p projects · n new · e edit · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sign in · q quit")
+		if m.archivedProject() {
+			body += "\n" + dimStyle.Render("Archived · read-only · Enter read · m older · r refresh · p projects · Esc back · q quit")
+		} else {
+			body += "\n" + dimStyle.Render("p projects · n new · e edit · v move · d delete · ↑/↓ or j/k select · Enter read · r refresh · m older · s sign in · q quit")
+		}
 	case readingStage:
-		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n" + dimStyle.Render("e edit · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
+		body = m.listTitle() + " · " + m.notes[m.selected].CreatedAt.Local().Format("Jan 02, 2006 15:04") + "\n\n" + m.reader.View() + "\n\n"
+		if m.archivedProject() {
+			body += dimStyle.Render("Archived · read-only · ↑/↓ or j/k scroll · Esc back · q quit")
+		} else {
+			body += dimStyle.Render("e edit · v move · d delete · ↑/↓ or j/k scroll · Esc back · q quit")
+		}
 	case captureStage:
 		heading := "New note"
 		if m.editorID != "" {
@@ -1137,9 +1409,13 @@ func (m Model) View() string {
 		}
 		body = "Permanently delete “" + title + "”?\nThere is no Trash and this cannot be undone.\n\n" + dimStyle.Render("y delete permanently · n or Esc cancel")
 	case projectsStage:
-		body = "Projects\n\n"
+		if m.showArchived {
+			body = "Archived projects\n\n"
+		} else {
+			body = "Active projects\n\n"
+		}
 		if len(m.projects) == 0 && !m.busy && m.message == "" {
-			body += "No projects yet.\n"
+			body += "No projects in this view.\n"
 		}
 		rows := max(3, m.height-11)
 		start := max(0, m.projectSelected-rows+1)
@@ -1150,9 +1426,43 @@ func (m Model) View() string {
 			}
 			body += fmt.Sprintf("%s%s\n", mark, preview(m.projects[i].Name, max(12, m.innerWidth()-6)))
 		}
-		body += "\n" + dimStyle.Render("a new · Enter open · i Inbox · r refresh · Esc Inbox · q quit")
+		if m.showArchived {
+			body += "\n" + dimStyle.Render("u unarchive · t active · Enter read-only · i Inbox · r refresh · Esc Inbox · q quit")
+		} else {
+			body += "\n" + dimStyle.Render("a new · x archive · t archived · Enter open · i Inbox · r refresh · Esc Inbox · q quit")
+		}
 	case newProjectStage:
 		body = "New project\n\nName\n" + m.inputs[projectNameInput].View() + "\n\n" + dimStyle.Render("Enter create · Esc cancel")
+	case moveStage:
+		body = "Move note from " + m.listTitle() + "\n\n"
+		for _, note := range m.notes {
+			if note.ID == m.moveID {
+				body += preview(note.Content, max(12, m.innerWidth()-5)) + "\n\n"
+				break
+			}
+		}
+		if len(m.moveTargets) == 0 && !m.busy && m.message == "" {
+			body += "No other active locations. Create a project first.\n"
+		}
+		rows := max(3, m.height-13)
+		start := max(0, m.moveSelected-rows+1)
+		for i := start; i < len(m.moveTargets) && i < start+rows; i++ {
+			mark := "  "
+			if i == m.moveSelected {
+				mark = "› "
+			}
+			body += mark + preview(m.moveTargets[i].name, max(12, m.innerWidth()-5)) + "\n"
+		}
+		body += "\n" + dimStyle.Render("↑/↓ or j/k select · Enter move · r refresh · Esc cancel")
+	case archiveStage:
+		name := "this project"
+		for _, project := range m.projects {
+			if project.ID == m.archiveID {
+				name = preview(project.Name, max(12, m.innerWidth()-5))
+				break
+			}
+		}
+		body = "Archive “" + name + "”?\nIts notes will stay available, but you cannot edit, move, create, or delete notes in an archived project until it is unarchived.\n\n" + dimStyle.Render("y archive · n or Esc cancel")
 	}
 	if m.busy {
 		body += "\n\nWorking…"

@@ -319,3 +319,99 @@ func derefCursor(cursor *string) string {
 	}
 	return *cursor
 }
+
+func TestMoveNoteProjectAndInbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/v1/notes/note-id" || r.Header.Get("Authorization") != "Bearer session" {
+			t.Errorf("unexpected move request: %s %s %q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+			t.Error(err)
+			return
+		}
+		if len(fields) != 1 {
+			t.Errorf("move must patch only project_id: %v", fields)
+		}
+		switch string(fields["project_id"]) {
+		case `"p1"`:
+			_, _ = w.Write([]byte(`{"id":"note-id","content":"untouched","project_id":"p1"}`))
+		case `null`:
+			_, _ = w.Write([]byte(`{"id":"note-id","content":"untouched","project_id":null}`))
+		default:
+			t.Errorf("unexpected project_id JSON: %s", fields["project_id"])
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProject, err := client.MoveNote(context.Background(), "session", "note-id", "p1")
+	if err != nil || inProject.ProjectID == nil || *inProject.ProjectID != "p1" || inProject.Content != "untouched" {
+		t.Fatalf("move into project: %+v, %v", inProject, err)
+	}
+	inInbox, err := client.MoveNote(context.Background(), "session", "note-id", "")
+	if err != nil || inInbox.ProjectID != nil || inInbox.Content != "untouched" {
+		t.Fatalf("move to Inbox: %+v, %v", inInbox, err)
+	}
+}
+
+func TestMoveConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"Archived project."}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.MoveNote(context.Background(), "session", "note-id", "p1")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict || apiErr.Code != "conflict" {
+		t.Fatalf("expected conflict: %v", err)
+	}
+}
+
+func TestArchiveProjectEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer session" {
+			t.Errorf("missing Authorization for %s", r.URL.Path)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			if r.URL.Query().Get("status") != "archived" || len(r.URL.Query()) != 1 {
+				t.Errorf("expected archived status query: %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[{"id":"p1","name":"Past","archived_at":"2026-09-29T10:00:00Z"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/p1/archive":
+			if r.ContentLength > 0 {
+				t.Error("archive request must not contain a body")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/p1/unarchive":
+			if r.ContentLength > 0 {
+				t.Error("unarchive request must not contain a body")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := client.ArchivedProjects(context.Background(), "session")
+	if err != nil || len(projects) != 1 || projects[0].ArchivedAt == nil || projects[0].ID != "p1" {
+		t.Fatalf("archived projects: %+v, %v", projects, err)
+	}
+	if err := client.ArchiveProject(context.Background(), "session", "p1"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if err := client.UnarchiveProject(context.Background(), "session", "p1"); err != nil {
+		t.Fatalf("unarchive: %v", err)
+	}
+}
