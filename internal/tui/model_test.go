@@ -336,7 +336,7 @@ func TestRestoreNeedsExplicitConsent(t *testing.T) {
 		t.Fatal("expected restoration confirmation without ticket exposure")
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if f.restores != 0 || m.ticket != "" || m.stage != emailStage {
+	if f.restores != 0 || m.ticket != "" || m.stage != loginStage {
 		t.Fatal("decline must not restore")
 	}
 	next, _ = m.Update(verifyResult{result: api.VerifyResult{Status: "restore_required", RecoveryTicket: "secret-ticket"}})
@@ -400,7 +400,7 @@ func TestExpiredSessionRemoved(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || m.token != "" || s.token != "" || s.deletes != 1 {
+	if m.stage != loginStage || m.token != "" || s.token != "" || s.deletes != 1 {
 		t.Fatal("expired session not cleared")
 	}
 }
@@ -489,7 +489,7 @@ func TestQuickCaptureUnauthorizedResumesAfterSignIn(t *testing.T) {
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || !m.resumeDraft || m.draft.Value() != "Unsent note" || s.token != "" {
+	if m.stage != loginStage || !m.resumeDraft || m.draft.Value() != "Unsent note" || s.token != "" {
 		t.Fatal("expired session lost draft")
 	}
 	cmd = m.signedIn("new-token")
@@ -1155,7 +1155,7 @@ func TestSessionsRevokeRemoteAndLogout(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if f.logoutCalls != 1 || m.stage != emailStage || m.token != "" || store.deletes != 1 {
+	if f.logoutCalls != 1 || m.stage != loginStage || m.token != "" || store.deletes != 1 {
 		t.Fatal("logout did not revoke and clear credential")
 	}
 }
@@ -1180,7 +1180,7 @@ func TestSessionsRevokeAllAndFailures(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || m.token != "" || store.deletes != 1 || f.revokeAllCalls != 2 {
+	if m.stage != loginStage || m.token != "" || store.deletes != 1 || f.revokeAllCalls != 2 {
 		t.Fatal("revoke-all did not sign out")
 	}
 }
@@ -1200,7 +1200,7 @@ func TestRevokeCurrentSessionSignsOut(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || store.deletes != 1 || m.token != "" {
+	if m.stage != loginStage || store.deletes != 1 || m.token != "" {
 		t.Fatal("revoke current did not sign out")
 	}
 }
@@ -1241,7 +1241,7 @@ func TestSessionActionUnauthorizedClearsCredential(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || m.token != "" || store.deletes != 1 {
+	if m.stage != loginStage || m.token != "" || store.deletes != 1 {
 		t.Fatal("unauthorized session action retained credential")
 	}
 }
@@ -1325,7 +1325,7 @@ func TestAccountDeletionConfirmationAndFailure(t *testing.T) {
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEnter})
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.stage != emailStage || store.deletes != 1 || m.token != "" || f.deletionCalls != 2 || !strings.Contains(m.View(), "Oct 29") {
+	if m.stage != loginStage || store.deletes != 1 || m.token != "" || f.deletionCalls != 2 || !strings.Contains(m.View(), "Oct 29") {
 		t.Fatal("accepted deletion did not sign out and show deadline")
 	}
 }
@@ -1503,7 +1503,7 @@ func TestTelegramRestoreDeclineAndStartFailure(t *testing.T) {
 	m.ticket = "private-ticket"
 	m.stage = restoreStage
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if m.stage != emailStage || f.telegramRestoreCalls != 0 || m.ticket != "" || m.telegramAttempt != "" {
+	if m.stage != loginStage || f.telegramRestoreCalls != 0 || m.ticket != "" || m.telegramAttempt != "" {
 		t.Fatal("declining restore did not clear secrets")
 	}
 }

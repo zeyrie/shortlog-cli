@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -58,6 +59,7 @@ type stage int
 
 const (
 	startupStage stage = iota
+	loginStage
 	emailStage
 	codeStage
 	profileStage
@@ -114,6 +116,7 @@ type Model struct {
 	telegramURL        string
 	telegramExpires    time.Time
 	telegramGeneration uint64
+	telegramBack       stage
 	openBrowser        func(string) error
 	token              string // Never rendered or logged.
 	email              string
@@ -138,6 +141,7 @@ type Model struct {
 	sessionID          string
 	nextCursor         string
 	selected           int
+	loginOptions       list.Model
 	reader             viewport.Model
 	draft              textarea.Model
 	editorID           string
@@ -171,6 +175,7 @@ const (
 
 func New(client emailAPI, store sessionStore) Model {
 	m := Model{api: client, store: store, stage: startupStage, width: 80, height: 24, busy: true, reader: viewport.New(64, 14), openBrowser: openTelegramBrowser}
+	m.loginOptions = newLoginOptions()
 	m.draft = textarea.New()
 	m.draft.Placeholder = "What's on your mind?"
 	m.draft.CharLimit = 20000
@@ -371,42 +376,11 @@ func (m *Model) finishSession() {
 	m.inboxStashed = false
 	m.inboxNeedsRefresh = false
 	m.showArchived = false
-	m.stage = emailStage
-	m.focusInput(emailInput)
+	m.stage = loginStage
+	m.inputs[m.focus].Blur()
 	m.message = "Signed out."
 	if err != nil {
 		m.message = "Signed out on the server, but the saved credential could not be removed. Remove it from your credential store before restarting."
-	}
-}
-
-func (m *Model) clearTelegram() {
-	m.telegramLogin = false
-	m.telegramAttempt = ""
-	m.telegramSecret = ""
-	m.telegramURL = ""
-	m.telegramExpires = time.Time{}
-	m.telegramGeneration++
-	m.ticket = ""
-}
-
-func (m Model) telegramTimer() tea.Cmd {
-	attempt := m.telegramAttempt
-	generation := m.telegramGeneration
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return telegramTick{attempt, generation} })
-}
-
-func (m *Model) pollTelegram(name, zone string) tea.Cmd {
-	if !time.Now().Before(m.telegramExpires) {
-		m.message = "Telegram attempt expired. Press Esc then t to start again."
-		return nil
-	}
-	m.busy = true
-	m.telegramGeneration++
-	m.message = "Checking Telegram approval…"
-	id, secret := m.telegramAttempt, m.telegramSecret
-	return func() tea.Msg {
-		result, err := m.api.PollTelegram(context.Background(), id, secret, name, zone)
-		return telegramPollResult{id, result, err}
 	}
 }
 
@@ -465,105 +439,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.resizeLoginOptions()
 		m.resizeReader()
 		m.draft.SetWidth(m.innerWidth())
 		m.draft.SetHeight(max(3, m.height-10))
 		return m, nil
 	case loadedSession:
-		if msg.err != nil {
-			m.stage, m.busy = emailStage, false
-			m.message = "Credential store unavailable. Sign in; this session may not be saved."
-			return m, nil
-		}
-		if msg.token == "" {
-			m.stage, m.busy = emailStage, false
-			return m, nil
-		}
-		m.token = msg.token
-		m.message = "Checking saved session…"
-		return m, m.loadInbox(msg.token, false)
+		return m.onLoadedSession(msg)
 	case telegramStartResult:
-		m.busy = false
-		if msg.err != nil {
-			m.clearTelegram()
-			var apiErr *api.Error
-			if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
-				m.message = "Telegram sign-in unavailable. Configure Telegram on the server or use email."
-			} else {
-				m.message = friendlyError(msg.err, "Could not start Telegram sign-in.")
-			}
-			return m, nil
-		}
-		if !validTelegramURL(msg.start.AuthorizationURL) {
-			m.clearTelegram()
-			m.message = "Server returned an unsafe Telegram sign-in URL. Sign-in was cancelled."
-			return m, nil
-		}
-		m.telegramLogin = true
-		m.telegramAttempt = msg.start.AttemptID
-		m.telegramSecret = msg.start.PollSecret
-		m.telegramURL = msg.start.AuthorizationURL
-		m.telegramExpires = time.Now().Add(10 * time.Minute)
-		m.stage = telegramStage
-		m.message = "Approve sign-in in your browser; this screen checks automatically."
-		id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
-		return m, tea.Batch(m.telegramTimer(), func() tea.Msg {
-			return telegramBrowserResult{id, opener(address)}
-		})
+		return m.onTelegramStart(msg)
 	case telegramBrowserResult:
-		if m.stage == telegramStage && m.telegramAttempt == msg.attempt && msg.err != nil {
-			m.message = "Could not open the browser. Press o to retry, or copy the URL below into your browser."
-		}
-		return m, nil
+		return m.onTelegramBrowser(msg)
 	case telegramTick:
-		if m.stage != telegramStage || m.telegramAttempt != msg.attempt || m.telegramGeneration != msg.generation || m.busy {
-			return m, nil
-		}
-		return m, m.pollTelegram("", "")
+		return m.onTelegramTick(msg)
 	case telegramPollResult:
-		if m.telegramAttempt != msg.attempt || (!m.telegramLogin) || (m.stage != telegramStage && m.stage != profileStage) {
-			return m, nil
-		}
-		m.busy = false
-		if msg.err != nil {
-			var apiErr *api.Error
-			if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-				m.stage = profileStage
-				m.focusInput(usernameInput)
-				m.message = "New Telegram account: enter a name and IANA time zone."
-				return m, nil
-			}
-			if errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
-				if m.stage == profileStage {
-					m.message = "Server rejected the profile or attempt. Check your details; if expired, press Esc and start again."
-				} else {
-					m.message = "Telegram attempt expired or invalid. Press Esc then Ctrl+T to start again."
-				}
-			} else if errors.As(msg.err, &apiErr) && apiErr.Code == "service_unavailable" {
-				m.message = "Telegram sign-in is temporarily unavailable. Press r to retry or Esc to cancel."
-			} else {
-				m.message = friendlyError(msg.err, "Could not check Telegram approval.") + " Press r to retry."
-			}
-			return m, nil
-		}
-		switch msg.result.Status {
-		case "pending":
-			if m.stage == profileStage {
-				m.message = "Still waiting for Telegram approval. Press Enter to check again."
-				return m, nil
-			}
-			m.message = "Waiting for Telegram approval… Press r to check now or Esc to cancel."
-			return m, m.telegramTimer()
-		case "restore_required":
-			m.stage = restoreStage
-			m.ticket = msg.result.RecoveryTicket
-			m.message = ""
-			return m, nil
-		case "signed_in":
-			m.clearTelegram()
-			return m, m.signedIn(msg.result.Token)
-		}
-		return m, nil
+		return m.onTelegramPoll(msg)
 	case accountResult:
 		m.busy = false
 		if msg.err != nil {
@@ -686,8 +576,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.store.Delete()
 				m.token = ""
 				m.activeProject = nil
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -727,8 +617,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -757,8 +647,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -781,8 +671,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -828,8 +718,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -868,8 +758,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.store.Delete()
 				m.token = ""
 				m.resumeDraft = true
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again to resume your draft."
 				return m, nil
 			}
@@ -897,8 +787,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.token = ""
 				m.resumeDraft = true
 				m.editorBack = inboxStage
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again to resume your unsaved edits."
 				return m, nil
 			}
@@ -935,8 +825,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -961,8 +851,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 				_ = m.store.Delete()
 				m.token = ""
-				m.stage = emailStage
-				m.focusInput(emailInput)
+				m.stage = loginStage
+				m.inputs[m.focus].Blur()
 				m.message = "Session expired. Sign in again."
 				return m, nil
 			}
@@ -995,53 +885,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = "Note moved to " + safeText(msg.destination.name) + "."
 		return m, nil
 	case startResult:
-		m.busy = false
-		if msg.err != nil {
-			m.message = friendlyError(msg.err, "Could not send a code.")
-		} else {
-			m.challenge = msg.id
-			m.stage = codeStage
-			m.inputs[codeInput].SetValue("")
-			m.focusInput(codeInput)
-			m.message = "Check your email. The code expires in 10 minutes."
-		}
-		return m, nil
+		return m.onEmailStart(msg)
 	case verifyResult:
-		m.busy = false
-		if msg.err != nil {
-			var apiErr *api.Error
-			if errors.As(msg.err, &apiErr) && apiErr.Code == "profile_required" {
-				m.stage = profileStage
-				m.focusInput(usernameInput)
-				m.message = "New account: enter a name and IANA time zone, then verify again."
-			} else {
-				m.message = friendlyError(msg.err, "Could not verify the code.")
-			}
-			return m, nil
-		}
-		if msg.result.Status == "restore_required" {
-			m.stage = restoreStage
-			m.ticket = msg.result.RecoveryTicket
-			m.inputs[codeInput].SetValue("")
-			m.message = ""
-		} else {
-			return m, m.signedIn(msg.result.Token)
-		}
-		return m, nil
+		return m.onEmailVerify(msg)
 	case restoreResult:
-		m.busy = false
-		if msg.err != nil {
-			var apiErr *api.Error
-			if m.telegramLogin && errors.As(msg.err, &apiErr) && apiErr.Code == "invalid_request" {
-				m.message = "Telegram restoration expired or was already used. Press Esc then Ctrl+T to start again."
-			} else {
-				m.message = friendlyError(msg.err, "Could not restore the account.")
-			}
-		} else {
-			m.clearTelegram()
-			return m, m.signedIn(msg.token)
-		}
-		return m, nil
+		return m.onRestore(msg)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			if m.stage == captureStage && !m.busy && m.draft.Value() != m.editorStart {
@@ -1052,13 +900,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		if msg.String() == "esc" && m.stage == telegramStage {
-			m.clearTelegram()
-			m.stage = emailStage
-			m.busy = false
-			m.message = "Telegram sign-in cancelled."
-			m.focusInput(emailInput)
-			return m, nil
+		if isLoginStage(m.stage) {
+			return m.updateLoginKey(msg)
 		}
 		if m.busy {
 			return m, nil
@@ -1089,26 +932,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = ""
 				return m, nil
 			case startupStage:
-				m.stage = emailStage
+				m.stage = loginStage
 				m.token = ""
-				m.focusInput(emailInput)
-			case codeStage:
-				m.stage = emailStage
-				m.challenge = ""
-				m.focusInput(emailInput)
-			case profileStage:
-				if m.telegramLogin {
-					m.clearTelegram()
-					m.stage = emailStage
-					m.focusInput(emailInput)
-				} else {
-					m.stage = codeStage
-					m.focusInput(codeInput)
-				}
-			case restoreStage:
-				m.clearTelegram()
-				m.stage = emailStage
-				m.focusInput(emailInput)
 			case readingStage:
 				m.stage = inboxStage
 				return m, nil
@@ -1170,94 +995,6 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch m.stage {
-		case emailStage:
-			if msg.String() == "ctrl+t" {
-				m.clearTelegram()
-				m.busy = true
-				m.message = "Starting Telegram sign-in…"
-				return m, func() tea.Msg {
-					start, err := m.api.StartTelegram(context.Background())
-					return telegramStartResult{start, err}
-				}
-			}
-			if msg.String() == "enter" {
-				m.clearTelegram()
-				address := strings.TrimSpace(m.inputs[emailInput].Value())
-				if address == "" || !strings.Contains(address, "@") {
-					m.message = "Enter a valid email address."
-					return m, nil
-				}
-				m.email, m.busy, m.message = address, true, ""
-				return m, func() tea.Msg {
-					id, err := m.api.StartEmail(context.Background(), address)
-					return startResult{id, err}
-				}
-			}
-		case codeStage:
-			if msg.String() == "enter" {
-				code := m.inputs[codeInput].Value()
-				if !eightDigits(code) {
-					m.message = "Enter the 8-digit code from your email."
-					return m, nil
-				}
-				return m.verify(code, "", "")
-			}
-		case profileStage:
-			if msg.String() == "tab" || msg.String() == "shift+tab" {
-				if m.focus == usernameInput {
-					m.focusInput(zoneInput)
-				} else {
-					m.focusInput(usernameInput)
-				}
-				return m, nil
-			}
-			if msg.String() == "enter" {
-				name := strings.TrimSpace(m.inputs[usernameInput].Value())
-				zone := strings.TrimSpace(m.inputs[zoneInput].Value())
-				if name == "" || zone == "" {
-					m.message = "Both name and IANA time zone are required."
-					return m, nil
-				}
-				if _, err := time.LoadLocation(zone); err != nil {
-					m.message = "Enter a valid IANA time zone (for example, Europe/London)."
-					return m, nil
-				}
-				if m.telegramLogin {
-					return m, m.pollTelegram(name, zone)
-				}
-				return m.verify(m.inputs[codeInput].Value(), name, zone)
-			}
-		case restoreStage:
-			switch strings.ToLower(msg.String()) {
-			case "y":
-				m.busy, m.message = true, ""
-				ticket := m.ticket
-				return m, func() tea.Msg {
-					var token string
-					var err error
-					if m.telegramLogin {
-						token, err = m.api.RestoreTelegram(context.Background(), ticket)
-					} else {
-						token, err = m.api.RestoreEmail(context.Background(), ticket)
-					}
-					return restoreResult{token, err}
-				}
-			case "n":
-				m.clearTelegram()
-				m.stage = emailStage
-				m.focusInput(emailInput)
-				m.message = "Restoration cancelled."
-			}
-			return m, nil
-		case telegramStage:
-			switch msg.String() {
-			case "r":
-				return m, m.pollTelegram("", "")
-			case "o":
-				id, address, opener := m.telegramAttempt, m.telegramURL, m.openBrowser
-				return m, func() tea.Msg { return telegramBrowserResult{id, opener(address)} }
-			}
-			return m, nil
 		case startupStage:
 			if msg.String() == "r" && m.token != "" {
 				m.busy = true
@@ -1709,7 +1446,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	}
-	if (m.stage <= profileStage || m.stage == newProjectStage) && !m.busy {
+	if m.stage == newProjectStage && !m.busy {
 		var cmd tea.Cmd
 		m.inputs[m.focus], cmd = m.inputs[m.focus].Update(message)
 		return m, cmd
@@ -1815,32 +1552,6 @@ func (m *Model) closeEditor(message string) {
 	m.message = message
 }
 
-func (m Model) verify(code, name, zone string) (tea.Model, tea.Cmd) {
-	m.busy, m.message = true, ""
-	return m, func() tea.Msg {
-		result, err := m.api.VerifyEmail(context.Background(), m.challenge, code, name, zone)
-		return verifyResult{result, err}
-	}
-}
-
-func (m *Model) signedIn(token string) tea.Cmd {
-	m.token = token
-	m.ticket = ""
-	m.challenge = ""
-	m.inputs[codeInput].SetValue("")
-	m.activeProject = nil
-	m.projects = nil
-	m.projectSelected = 0
-	m.showArchived = false
-	m.inboxList = noteList{}
-	m.inboxStashed = false
-	m.inboxNeedsRefresh = false
-	m.stage = inboxStage
-	m.busy = true
-	m.message = "Loading Inbox…"
-	return m.loadInbox(token, true)
-}
-
 func (m *Model) resizeReader() {
 	width := m.innerWidth()
 	m.reader.Width = width
@@ -1930,23 +1641,15 @@ var (
 )
 
 func (m Model) View() string {
+	if m.stage == loginStage {
+		return m.loginView()
+	}
 	var body string
 	switch m.stage {
 	case startupStage:
 		body = "Checking saved session…\n\n" + dimStyle.Render("Ctrl+C quit")
-	case emailStage:
-		body = "Sign in\n\nEmail\n" + m.inputs[emailInput].View() + "\n\n" + dimStyle.Render("Enter send email code · Ctrl+T sign in with Telegram · Ctrl+C quit")
-	case telegramStage:
-		body = "Sign in with Telegram\n\nApprove access in your browser. This attempt expires in about 10 minutes.\n\n" + dimStyle.Render("r check now · o reopen browser · Esc cancel")
-		if strings.Contains(m.message, "Could not open the browser") {
-			body += "\n\nOpen manually: " + safeText(m.telegramURL)
-		}
-	case codeStage:
-		body = fmt.Sprintf("Code sent to %s\n\n8-digit code\n%s\n\n%s", m.email, m.inputs[codeInput].View(), dimStyle.Render("Enter verify · Esc change email · Ctrl+C quit"))
-	case profileStage:
-		body = "Finish creating your account\n\nName\n" + m.inputs[usernameInput].View() + "\n\nTime zone (IANA)\n" + m.inputs[zoneInput].View() + "\n\n" + dimStyle.Render("Tab switch field · Enter continue · Esc cancel/back")
-	case restoreStage:
-		body = "This account is scheduled for deletion.\nRestoring it keeps its projects and notes, but previously signed-in devices remain signed out.\n\nRestore this account? [y/N]"
+	case emailStage, telegramStage, codeStage, profileStage, restoreStage:
+		body = m.loginBody()
 	case inboxStage:
 		body = m.listTitle()
 		if m.archivedProject() {
@@ -2135,7 +1838,7 @@ func (m Model) View() string {
 	if m.message != "" {
 		body += "\n\n" + errStyle.Render(m.message)
 	}
-	content := titleStyle.Render("Shortlog") + "\n\n" + body
+	content := titleStyle.Render("ShortLog") + "\n\n" + body
 	width := m.contentWidth()
 	return lipgloss.NewStyle().Width(width).Padding(1, 2).Render(content)
 }
